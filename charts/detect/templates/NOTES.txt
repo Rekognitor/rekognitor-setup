@@ -1,0 +1,12 @@
+rekognitor-detect is listening on gRPC port {{ .Values.service.port }} (headless service "{{ .Values.serviceName }}").
+
+Point the streamer at it (helm-charts/streamer/values.yaml):
+  DETECT_SERVICES_URL: dns:///{{ .Values.serviceName }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Checks:
+  kubectl -n {{ .Release.Namespace }} get pods -l app={{ .Values.serviceName }}
+  kubectl -n {{ .Release.Namespace }} logs statefulset/{{ .Values.serviceName }}
+{{- if .Values.networkPolicy.enabled }}
+
+NetworkPolicy is on: only pods labelled {{ toJson .Values.networkPolicy.allowFrom }} can reach it.
+{{- end }}

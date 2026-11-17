@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.serviceName }}
+spec:
+  # headless: DNS returns the pod IPs for the streamer's client-side round_robin
+  clusterIP: None
+  ports:
+    - name: grpc
+      protocol: TCP
+      port: {{ .Values.service.port }}
+      targetPort: grpc
+  selector:
+    app: {{ .Values.serviceName }}

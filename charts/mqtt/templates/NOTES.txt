@@ -1,0 +1,35 @@
+comqtt MQTT broker "{{ .Values.serviceName }}" deployed.
+
+MQTT listeners:
+  TCP:        {{ .Values.mqtt.service.tcpPort }}   (rekognitor-rtsp-stream connects here)
+  WebSocket:  {{ .Values.mqtt.service.wsPort }}
+
+MQTT service type: {{ .Values.mqtt.service.type }}
+{{- if eq .Values.mqtt.service.type "LoadBalancer" }}
+
+Get the external address (k3s klipper assigns the node IP):
+  kubectl get svc {{ .Values.serviceName }} -o wide
+On this WSL host (mirrored networking) the broker is reachable at:
+  <this-host-LAN-IP>:{{ .Values.mqtt.service.tcpPort }}      e.g. 192.168.1.10:{{ .Values.mqtt.service.tcpPort }}
+  NodePort fallback:  <node-IP>:{{ .Values.mqtt.service.tcpNodePort }}
+
+To reach it from other machines on the LAN, allow the port through the Windows
+(Hyper-V) firewall — see helm-charts/mqtt/scripts/allow-wsl-inbound.ps1.
+{{- end }}
+
+Quick test:
+  mosquitto_sub -h <host> -p {{ .Values.mqtt.service.tcpPort }} -t 'cameras/#' -v
+  mosquitto_pub -h <host> -p {{ .Values.mqtt.service.tcpPort }} -t 'cameras/test' -m hello
+
+{{- if .Values.dashboard.enabled }}
+
+Dashboard / REST stats (http listener, port {{ .Values.dashboard.httpPort }}), service type: {{ .Values.dashboard.service.type }}
+  Login:     user "{{ .Values.dashboard.adminUser }}" / password "rekognitor-admin" (unless you changed the hash)
+  URL path:  /dashboard/
+{{- if eq .Values.dashboard.service.type "ClusterIP" }}
+  Reach it with a port-forward:
+    kubectl port-forward svc/{{ .Values.serviceName }}-dashboard {{ .Values.dashboard.httpPort }}:{{ .Values.dashboard.httpPort }}
+    then open http://localhost:{{ .Values.dashboard.httpPort }}/dashboard/
+{{- end }}
+  SECURITY: change dashboard.adminPasswordHash and dashboard.authSecret in values.yaml before exposing the UI beyond localhost.
+{{- end }}

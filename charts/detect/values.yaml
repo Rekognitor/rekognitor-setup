@@ -1,0 +1,46 @@
+serviceName: detect
+# Each pod runs ONE inference at a time (the ONNX session is serialised), so
+# throughput scales with replicas, not with threads. The HPA below overrides this
+# when enabled.
+replicaCount: 3
+image:
+  # built and published by rekognitor-detect/.github/workflows/docker-publish.yml
+  # (Alpine + ONNX Runtime, model bundled at /app/models)
+  repository: rekognitor/rekognitor-detect
+  pullPolicy: Always
+  tag: latest
+service:
+  # Headless (clusterIP: None) on purpose: the streamer dials
+  # dns:///detect.<ns>.svc.cluster.local:<port> with client-side round_robin and
+  # GRPC_RENEW_CONN_TICKER, which needs the pod IPs, not a single virtual IP.
+  # No authentication: never expose it outside the cluster.
+  port: 50051
+# The image bundles two models, both loaded at startup and chosen per request by the
+# streamer's modelFilter: "rtdet" = RT-DETRv2-S (/app/models/rtdetrv2-s.onnx, the
+# streamer's default) and "dlib" (or empty) = legacy coco50 YOLO.
+env:
+  # ONNX Runtime intra-op threads per inference; keep <= the CPU limit below.
+  ONNX_THREADS: "2"
+# Only pods with these labels may reach the gRPC port (the streamer). Requires a
+# CNI that enforces NetworkPolicy (k3s' default flannel+kube-router does). Add the
+# label of any other client (e.g. a k6 load-test pod) or disable it.
+networkPolicy:
+  enabled: true
+  allowFrom:
+    - app: streamer
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "1000m"
+  limits:
+    memory: "1Gi"
+    cpu: "2000m"
+hpa:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 60
+  scaleDownStabilizationWindowSeconds: 200 #+-3 minutes
+  scaleUpStabilizationWindowSeconds: 120 #2 minutes
+nodeSelector: {}
+tolerations: []

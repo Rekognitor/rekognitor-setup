@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.serviceName }}
+spec:
+  serviceName: "{{ .Values.serviceName }}"
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.serviceName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.serviceName }}
+      annotations:
+        # Roll the pod when config or the dashboard secret changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: {{ .Values.serviceName }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # comqtt's entrypoint is /comqtt (single-node); point it at the mounted config.
+          args:
+            - "--conf={{ .Values.configDir }}/conf.yml"
+          ports:
+            - name: mqtt-tcp
+              containerPort: {{ .Values.mqtt.service.tcpPort }}
+            - name: mqtt-ws
+              containerPort: {{ .Values.mqtt.service.wsPort }}
+            - name: http
+              containerPort: {{ .Values.dashboard.httpPort }}
+          volumeMounts:
+            - name: config-volume
+              mountPath: {{ .Values.configDir }}
+              readOnly: true
+            {{- if .Values.dashboard.enabled }}
+            - name: dashboard-secret
+              mountPath: {{ .Values.secretDir }}
+              readOnly: true
+            {{- end }}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ .Values.serviceName }}-config
+        {{- if .Values.dashboard.enabled }}
+        - name: dashboard-secret
+          secret:
+            secretName: {{ .Values.serviceName }}-dashboard
+        {{- end }}

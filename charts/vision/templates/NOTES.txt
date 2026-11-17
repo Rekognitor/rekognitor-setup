@@ -1,0 +1,15 @@
+{{ .Values.serviceName }} is deployed (gRPC FaceService, ClusterIP only).
+
+In-cluster endpoint for the streamer:
+  FACE_SERVICES_URL={{ .Values.serviceName }}:{{ .Values.service.port }}
+
+Enrolled faces persist on the "faces" PVC at {{ .Values.persistence.mountPath }}.
+They are biometric data (LGPD): keep REQUIRE_AUTH=1 on the streamer in production.
+{{- if .Values.networkPolicy.enabled }}
+
+Only pods labelled {{ range .Values.networkPolicy.allowFrom }}{{ toYaml . | replace "\n" "," }} {{ end }}may connect.
+{{- end }}
+
+Check it:
+  kubectl rollout status statefulset/{{ .Values.serviceName }}
+  kubectl logs statefulset/{{ .Values.serviceName }}

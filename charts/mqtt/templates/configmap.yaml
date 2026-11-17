@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.serviceName }}-config
+data:
+  # comqtt single-node config (github.com/wind-c/comqtt).
+  # NOTE: comqtt loads this file into a zero-value Config struct, so every field
+  # that must be non-zero has to be set explicitly here. In particular the whole
+  # mqtt.options.capabilities block must be present — omitting it silently
+  # disables wildcard subscriptions, QoS and retain (they default to zero/false).
+  conf.yml: |-
+    storage-way: 0        # 0 memory, 1 bolt, 2 badger, 3 redis (memory = ephemeral, like the old mochi setup)
+    bridge-way: 0         # 0 disable, 1 kafka
+    pprof-enable: false
+    dashboard-enable: {{ .Values.dashboard.enabled }}
+    {{- if .Values.dashboard.enabled }}
+    dashboard:
+      users-file: {{ .Values.configDir }}/dashboard-users.json
+      secret-file: {{ .Values.secretDir }}/auth-secret
+    {{- end }}
+
+    auth:
+      way: 0              # 0 anonymous (allow all), 1 username/password, 2 clientid
+      datasource: 0       # 0 free
+
+    mqtt:
+      tcp: ":{{ .Values.mqtt.service.tcpPort }}"
+      ws: ":{{ .Values.mqtt.service.wsPort }}"
+      http: ":{{ .Values.dashboard.httpPort }}"   # REST/stats + dashboard listener (replaces old mochi sysinfo)
+      options:
+        inline-client: true
+        capabilities:
+          maximum-message-expiry-interval: 86400
+          maximum-session-expiry-interval: 4294967295
+          maximum-client-writes-pending: 65535
+          maximum-packet-size: 0            # 0 = unlimited
+          receive-maximum: 1024
+          topic-alias-maximum: 65535
+          maximum-qos: 2
+          retain-available: 1
+          wildcard-sub-available: 1
+          sub-id-available: 1
+          shared-sub-available: 1
+          minimum-protocol-version: 3
+
+    log:
+      enable: true
+      format: 0           # 0 text, 1 json
+      output: 0           # 0 console (stdout, so `kubectl logs` works)
+      level: -4           # -4 debug, 0 info, 4 warn, 8 error (matches old mochi DEBUG)
+{{- if .Values.dashboard.enabled }}
+  # Seed users for the dashboard. Mounted read-only, so change credentials by
+  # updating dashboard.adminPasswordHash in values.yaml and redeploying
+  # (the in-UI "change password" button is disabled by this read-only mount).
+  dashboard-users.json: |-
+    [
+      {
+        "username": {{ .Values.dashboard.adminUser | quote }},
+        "hash": {{ .Values.dashboard.adminPasswordHash | quote }},
+        "role": "admin",
+        "must_change": false,
+        "created_at": 0
+      }
+    ]
+{{- end }}

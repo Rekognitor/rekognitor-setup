@@ -1,0 +1,54 @@
+serviceName: mqtt
+replicaCount: 1
+
+image:
+  repository: ghcr.io/wind-c/comqtt
+  # ghcr publishes comqtt tags without a "v" (v2.6.5 does not exist); 2.6.7 = latest
+  tag: "2.6.7"
+  pullPolicy: IfNotPresent
+
+# Read-only mount locations inside the container.
+configDir: /etc/comqtt/config
+secretDir: /etc/comqtt/secrets
+
+# ---------------------------------------------------------------------------
+# MQTT broker listeners (this is what rekognitor-rtsp-stream connects to).
+# Exposed externally so clients outside k3s / WSL can reach the broker.
+# On k3s the LoadBalancer is served by klipper (ServiceLB) and binds the node
+# IP; nodePort gives a stable fallback (nodeIP:nodePort).
+# ---------------------------------------------------------------------------
+mqtt:
+  service:
+    type: LoadBalancer
+    tcpPort: 1883
+    tcpNodePort: 31883
+    wsPort: 1882
+    wsNodePort: 31882
+
+# ---------------------------------------------------------------------------
+# Web dashboard + REST/stats listener (comqtt's http listener).
+# The http listener always runs (server stats); the dashboard UI at
+# /dashboard/ is added when enabled.
+# ---------------------------------------------------------------------------
+dashboard:
+  enabled: true
+  httpPort: 8080
+  adminUser: admin
+  # bcrypt hash of the admin password. Default password: "rekognitor-admin".
+  # Regenerate:  htpasswd -bnBC 10 "" 'NEWPASS' | tr -d ':\n' | sed 's/^\$2y/\$2a/'
+  adminPasswordHash: "$2a$10$Ivc7.1TJiJxsZajBiz2TzOjydLDGoXvFZpgby.Ng1UklgE67xBjI6"
+  # HMAC secret used to sign dashboard session (JWT) cookies. CHANGE THIS in prod.
+  authSecret: "set-by-installer"
+  service:
+    # ClusterIP by default so the UI is NOT LAN-exposed. Set to NodePort or
+    # LoadBalancer to reach it from Windows / the LAN, or use `kubectl port-forward`.
+    type: ClusterIP
+    nodePort: ""
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "250m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"

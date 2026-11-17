@@ -1,0 +1,5 @@
+apiVersion: v2
+name: vision
+description: rekognitor-vision - face detection, descriptors and enrolled-face search (gRPC FaceService) used by the streamer's facematch capability
+version: 0.1.0
+appVersion: latest

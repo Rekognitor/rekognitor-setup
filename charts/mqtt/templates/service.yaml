@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.serviceName }}
+  labels:
+    app: {{ .Values.serviceName }}
+spec:
+  type: {{ .Values.mqtt.service.type }}
+  ports:
+    - name: {{ .Values.serviceName }}-tcp
+      port: {{ .Values.mqtt.service.tcpPort }}
+      targetPort: {{ .Values.mqtt.service.tcpPort }}
+      protocol: TCP
+      {{- if and (ne .Values.mqtt.service.type "ClusterIP") .Values.mqtt.service.tcpNodePort }}
+      nodePort: {{ .Values.mqtt.service.tcpNodePort }}
+      {{- end }}
+    - name: {{ .Values.serviceName }}-ws
+      port: {{ .Values.mqtt.service.wsPort }}
+      targetPort: {{ .Values.mqtt.service.wsPort }}
+      protocol: TCP
+      {{- if and (ne .Values.mqtt.service.type "ClusterIP") .Values.mqtt.service.wsNodePort }}
+      nodePort: {{ .Values.mqtt.service.wsNodePort }}
+      {{- end }}
+  selector:
+    app: {{ .Values.serviceName }}

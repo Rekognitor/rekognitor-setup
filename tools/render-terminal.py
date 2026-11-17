@@ -62,6 +62,27 @@ def powershell_to_html(text: str) -> str:
     return "\n".join(lines)
 
 
+def bash_plain_to_html(text: str) -> str:
+    """Colour a log captured without a tty (e.g. `| tee` in CI) the way install.sh prints it."""
+    G, Y, R, C = COLOURS["32"], COLOURS["33"], COLOURS["31"], COLOURS["36"]
+    lines = []
+    for line in text.splitlines():
+        esc = html.escape(line)
+        s = line.strip()
+        if s.startswith("==>"):
+            esc = f'<span style="color:{C};font-weight:700">{esc}</span>'
+        elif s.startswith("✔"):
+            esc = esc.replace("✔", f'<span style="color:{G}">✔</span>', 1)
+        elif s.startswith("! "):
+            esc = esc.replace("!", f'<span style="color:{Y}">!</span>', 1)
+        elif s.startswith("✘"):
+            esc = f'<span style="color:{R};font-weight:700">{esc}</span>'
+        elif s[:1] in "╔║╚" or s.startswith(("Tudo certo", "Rekognitor desinstalado", "Rekognitor removido")):
+            esc = f'<span style="color:{G};font-weight:700">{esc}</span>'
+        lines.append(esc)
+    return "\n".join(lines)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("log")
@@ -73,7 +94,12 @@ def main() -> None:
     a = ap.parse_args()
 
     raw = open(a.log, encoding="utf-8", errors="replace").read().replace("\r\n", "\n").replace("\r", "")
-    body = ansi_to_html(raw) if a.theme == "bash" else powershell_to_html(raw)
+    if a.theme == "powershell":
+        body = powershell_to_html(raw)
+    elif ANSI.search(raw):
+        body = ansi_to_html(raw)
+    else:
+        body = bash_plain_to_html(raw)
     if a.theme == "powershell":
         bg, fg, bar = "#012456", "#eeedf0", "#f3f3f3"
         prompt = f'<span style="color:#eeedf0">{html.escape(a.prompt or "C:\\Rekognitor>")} </span>{html.escape(a.cmd)}\n' if a.cmd else ""
@@ -96,7 +122,7 @@ pre{{margin:0;background:{bg};color:{fg};font:14px/1.45 "DejaVu Sans Mono",Conso
         f.write(doc)
     # window size for the headless-Chrome screenshot (tools/screenshots.sh)
     plain = ANSI.sub("", raw).splitlines() + ([a.cmd + " " * 40] if a.cmd else [])
-    width = max(760, int(max(len(l) for l in plain) * 8.45) + 40) + 48
+    width = max(760, int(max(len(l) for l in plain) * 8.6) + 56) + 48
     height = int(len(plain) * 20.3) + 48 + 34 + 36 + 4
     print(f"{width},{height}")
 

@@ -1,7 +1,7 @@
 ﻿# Run by the "Rekognitor" scheduled task at logon (hidden window), installed by
 # install.ps1 into %ProgramData%\Rekognitor.
 #
-# WSL stops a distribution once nothing runs in it, which would stop k3s. This
+# WSL stops a distribution once nothing runs in it, which would stop k0s. This
 # keeps one process alive inside "Rekognitor" and, if WSL is in NAT mode (the
 # default), forwards the Rekognitor ports from Windows to the distribution's
 # current IP, which changes on every WSL start. In mirrored mode WSL already
@@ -9,12 +9,12 @@
 $ErrorActionPreference = 'Continue'
 $env:WSL_UTF8 = '1'
 $Distro = 'Rekognitor'
-$Ports = @(8085, 1883, 1882, 31881, 31882)
+$Ports = @(31881, 31882, 31883)   # NodePorts: UI, MQTT/WebSocket, MQTT
 $state = Get-Content (Join-Path $env:ProgramData 'Rekognitor\state.json') -Raw | ConvertFrom-Json
 $listen = if ($state.AllowLan) { '0.0.0.0' } else { '127.0.0.1' }
 
 while ($true) {
-    & wsl.exe -d $Distro -u root -- true   # boots the distribution (systemd -> k3s)
+    & wsl.exe -d $Distro -u root -- true   # boots the distribution (systemd -> k0s)
     if ($state.NetworkingMode -ne 'mirrored') {
         $ip = ((& wsl.exe -d $Distro -u root -- hostname -I) -join ' ').Trim().Split(' ')[0]
         if ($ip) {

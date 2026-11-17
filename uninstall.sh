@@ -6,8 +6,8 @@
 #
 # Removes the rekognitor charts and namespace (including the enrolled faces),
 # then only what install.sh itself installed, as recorded in ~/.rekognitor/state:
-# the k3s it installed, the k3d cluster and Colima VM it created, the Homebrew
-# packages it added and ~/.rekognitor. A k3s/Docker that was already on the
+# the k0s it installed (k0s reset), the k0s container and Colima VM it created,
+# the Homebrew packages it added and ~/.rekognitor. A k0s/Docker that was already on the
 # machine is left alone.
 # shellcheck disable=SC2015 # "cmd && ok || warn": ok only prints
 set -euo pipefail
@@ -48,8 +48,8 @@ done
 state_get() { sed -n "s/^$1=//p" "$STATE" | tail -1; }
 CLUSTER=$(state_get CLUSTER)
 CHARTS=$(state_get CHARTS)
-K3S_INSTALLED=$(state_get K3S_INSTALLED)
-K3D_CLUSTER=$(state_get K3D_CLUSTER)
+K0S_INSTALLED=$(state_get K0S_INSTALLED)
+K0S_CONTAINER=$(state_get K0S_CONTAINER)
 COLIMA_PROFILE=$(state_get COLIMA_PROFILE)
 BREW_INSTALLED=$(state_get BREW_INSTALLED)
 SUDO=""
@@ -62,8 +62,8 @@ echo "Será removido:"
 info "• serviços do Rekognitor: ${CHARTS:-?} (namespace $NAMESPACE)"
 info "• os rostos cadastrados e as configurações salvas"
 if [[ $KEEP_CLUSTER == 0 ]]; then
-  [[ $K3S_INSTALLED == 1 ]] && info "• o k3s (Kubernetes) instalado pelo Rekognitor"
-  [[ -n $K3D_CLUSTER ]] && info "• o cluster k3d '$K3D_CLUSTER'"
+  [[ $K0S_INSTALLED == 1 ]] && info "• o k0s (Kubernetes) instalado pelo Rekognitor"
+  [[ -n $K0S_CONTAINER ]] && info "• o contêiner k0s '$K0S_CONTAINER' e o volume dele"
   [[ -n $COLIMA_PROFILE ]] && info "• a VM Colima '$COLIMA_PROFILE'"
   [[ -n $BREW_INSTALLED ]] && info "• pacotes Homebrew instalados pelo Rekognitor:$BREW_INSTALLED"
   info "• a pasta $REK_HOME"
@@ -72,7 +72,7 @@ if [[ $YES == 0 ]]; then
   read -r -p "Confirmar a desinstalação? [s/N] " a || true
   [[ $a == s || $a == S || $a == y || $a == Y ]] || die "cancelado"
 fi
-[[ $KEEP_CLUSTER == 0 && $K3S_INSTALLED == 1 && -n $SUDO ]] && { sudo -v || die "sudo é necessário para remover o k3s"; }
+[[ $KEEP_CLUSTER == 0 && $K0S_INSTALLED == 1 && -n $SUDO ]] && { sudo -v || die "sudo é necessário para remover o k0s"; }
 
 step "Removendo o Rekognitor"
 if [[ -f $KCFG ]] && KUBECONFIG=$KCFG kubectl get ns "$NAMESPACE" >/dev/null 2>&1; then
@@ -94,15 +94,21 @@ if [[ $KEEP_CLUSTER == 1 ]]; then
 fi
 
 step "Removendo o Kubernetes e as ferramentas"
-if [[ $K3S_INSTALLED == 1 ]]; then
-  if [[ -x /usr/local/bin/k3s-uninstall.sh ]]; then
-    $SUDO /usr/local/bin/k3s-uninstall.sh >/dev/null 2>&1 && ok "k3s removido" || warn "k3s-uninstall.sh falhou"
-  else warn "k3s-uninstall.sh não encontrado (k3s já removido?)"; fi
-elif [[ $CLUSTER == k3s ]]; then
-  info "k3s já existia antes do Rekognitor: mantido"
+if [[ $K0S_INSTALLED == 1 ]]; then
+  if [[ -x /usr/local/bin/k0s ]]; then
+    # k0s reset removes the service, /var/lib/k0s, /etc/k0s and the CNI state
+    $SUDO /usr/local/bin/k0s stop >/dev/null 2>&1 || true
+    if $SUDO /usr/local/bin/k0s reset >/dev/null 2>&1; then ok "k0s parado e resetado"; else warn "k0s reset falhou"; fi
+    $SUDO rm -f /usr/local/bin/k0s
+    ok "k0s removido"
+    REBOOT_HINT=1
+  else warn "/usr/local/bin/k0s não encontrado (k0s já removido?)"; fi
+elif [[ $CLUSTER == k0s ]]; then
+  info "o k0s já existia antes do Rekognitor: mantido"
 fi
-if [[ -n $K3D_CLUSTER ]] && command -v k3d >/dev/null; then
-  k3d cluster delete "$K3D_CLUSTER" >/dev/null 2>&1 && ok "cluster k3d '$K3D_CLUSTER' removido" || warn "falha ao remover o cluster k3d"
+if [[ -n $K0S_CONTAINER ]] && command -v docker >/dev/null; then
+  docker rm -f "$K0S_CONTAINER" >/dev/null 2>&1 && ok "contêiner $K0S_CONTAINER removido" || warn "falha ao remover o contêiner $K0S_CONTAINER"
+  docker volume rm "$K0S_CONTAINER" >/dev/null 2>&1 && ok "volume $K0S_CONTAINER removido" || true
 fi
 if [[ -n $COLIMA_PROFILE ]] && command -v colima >/dev/null; then
   colima delete "$COLIMA_PROFILE" --force >/dev/null 2>&1 && ok "VM Colima '$COLIMA_PROFILE' removida" || warn "falha ao remover a VM Colima"
@@ -118,3 +124,6 @@ rm -rf "$REK_HOME"
 ok "$REK_HOME removida"
 
 printf '\n%sRekognitor desinstalado.%s\n' "$G$B" "$N"
+if [[ ${REBOOT_HINT:-0} == 1 ]]; then
+  info "Recomendação do k0s: reinicie a máquina para limpar as regras de rede (iptables) que restarem."
+fi

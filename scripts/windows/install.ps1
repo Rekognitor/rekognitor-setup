@@ -3,7 +3,8 @@
 # Run it through install-windows.cmd (double click). It:
 #   1. installs WSL2 if missing (asks for a reboot and resumes on next logon);
 #   2. imports a dedicated Ubuntu 24.04 WSL distribution named "Rekognitor";
-#   3. runs install.sh inside it (k3s + the rekognitor charts);
+#   3. runs install.sh inside it (k0s + the rekognitor charts), the same k0s
+#      the Linux installer uses;
 #   4. creates the "Rekognitor" logon task that keeps the distribution running
 #      (and, in WSL NAT mode, forwards the ports to it);
 #   5. optionally opens the ports to the LAN, creates a desktop shortcut and opens
@@ -32,7 +33,7 @@ $Home_     = Join-Path $env:ProgramData 'Rekognitor'
 $StateFile = Join-Path $Home_ 'state.json'
 $Root      = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $UiPort    = 31881
-$Ports     = @(8085, 1883, 1882, 31881, 31882)
+$Ports     = @(31881, 31882, 31883)   # NodePorts: UI, MQTT/WebSocket, MQTT
 $RootfsBase = 'https://cloud-images.ubuntu.com/wsl/releases/24.04/current'
 
 function Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
@@ -143,7 +144,7 @@ if ($Check) { Write-Host ""; Write-Host "Tudo certo: esta máquina pode instalar
 
 if (-not $state.Distro) {
     Write-Host ""
-    Info "Será criada a distribuição WSL '$Distro' (Ubuntu 24.04) com o Kubernetes (k3s)"
+    Info "Será criada a distribuição WSL '$Distro' (Ubuntu 24.04) com o Kubernetes (k0s)"
     Info "e os serviços do Rekognitor. Suas outras distribuições WSL não são alteradas."
     if (-not (Confirm-Action "Continuar?")) { Fail "cancelado" }
 }
@@ -190,7 +191,7 @@ if (-not (Distro-Exists)) {
     if ($LASTEXITCODE -ne 0) { Fail "wsl --import falhou (código $LASTEXITCODE)" }
     Remove-Item $tar -Force
     Set-State 'Distro' $Distro
-    # systemd runs k3s as a service; no Windows PATH (spaces) inside the distro
+    # systemd runs k0s as a service; no Windows PATH (spaces) inside the distro
     In-Distro "printf '[boot]\nsystemd=true\n\n[user]\ndefault=root\n\n[interop]\nappendWindowsPath=false\n' > /etc/wsl.conf"
     & wsl.exe --terminate $Distro | Out-Null
     Ok "distribuição '$Distro' criada"
@@ -227,7 +228,7 @@ In-Distro "set -e; rm -rf /opt/rekognitor; mkdir -p /opt/rekognitor; tar -C '$ws
 if ($LASTEXITCODE -ne 0) { Fail "falha ao copiar $Root para a distribuição" }
 Ok "instalador em /opt/rekognitor"
 
-& wsl.exe -d $Distro -u root -- bash /opt/rekognitor/install.sh --yes --cluster k3s --profile $Sizing --timeout $Timeout
+& wsl.exe -d $Distro -u root -- bash /opt/rekognitor/install.sh --yes --cluster k0s --profile $Sizing --timeout $Timeout
 if ($LASTEXITCODE -ne 0) { Fail "a instalação dentro do WSL falhou (veja as mensagens acima)" }
 
 # ------------------------------------------------------- Windows-side access ---
@@ -279,7 +280,7 @@ Write-Host "==========================================================" -Foregro
 Write-Host ""
 Write-Host "  Interface web    $url   (atalho na Área de Trabalho)"
 if ($AllowLan) { Write-Host "                   na rede: http://${ip}:$UiPort" }
-Write-Host "  MQTT (câmeras)   ${ip}:1883"
+Write-Host "  MQTT (câmeras)   ${ip}:31883   (WebSocket: ${ip}:31882)"
 $creds = In-Distro "cat /root/.rekognitor/secrets"
 $clientId = ($creds | Select-String '^CLIENT_ID=(.*)$').Matches.Groups[1].Value
 $secret = ($creds | Select-String '^SECRET=(.*)$').Matches.Groups[1].Value

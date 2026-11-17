@@ -2,11 +2,14 @@ name: installer
 
 # lint     - shellcheck, PowerShell parse/analyzer, helm lint + template (both profiles),
 #            and no secret from the private chart repo leaked into charts/
-# linux    - the real thing on Ubuntu: install.sh (k3s + charts, pods Ready, UI
-#            healthy), install.sh again (upgrade path), uninstall.sh (k3s and
-#            ~/.rekognitor gone). The logs are uploaded as an artifact.
+# linux    - the real thing on Ubuntu, for both k0s modes:
+#              k0s         native k0s (Linux, and what Windows runs inside WSL)
+#              k0s-docker  k0s in the official container (what macOS runs)
+#            install.sh (k0s + charts, pods Ready, UI and MQTT NodePorts up),
+#            install.sh again (upgrade path), uninstall.sh (k0s and ~/.rekognitor
+#            gone). The logs are uploaded as artifacts (linux-logs-<cluster>).
 # macos    - install.sh/uninstall.sh parse and run --help under macOS' bash 3.2
-#            (hosted macOS runners cannot run Docker, so no cluster here)
+#            (hosted macOS runners cannot run Docker: k0s-docker is covered above)
 # windows  - PSScriptAnalyzer on the .ps1 files (hosted runners have no WSL2)
 
 on:
@@ -39,7 +42,8 @@ jobs:
             for dir in charts/*/; do
               chart=$(basename "$dir")
               values=()
-              [[ -f "values/$profile/$chart.yaml" ]] && values=(-f "values/$profile/$chart.yaml")
+              [[ -f "values/common/$chart.yaml" ]] && values+=(-f "values/common/$chart.yaml")
+              [[ -f "values/$profile/$chart.yaml" ]] && values+=(-f "values/$profile/$chart.yaml")
               helm lint "$dir" "${values[@]}"
               helm template "$chart" "$dir" -n rekognitor "${values[@]}" >/dev/null
             done
@@ -52,14 +56,21 @@ jobs:
           grep -qE '^  authSecret: "set-by-installer"$' charts/mqtt/values.yaml
 
   linux:
+    name: linux (${{ matrix.cluster }})
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        cluster: [k0s, k0s-docker]
+    env:
+      CLUSTER: ${{ matrix.cluster }}
     steps:
       - uses: actions/checkout@v4
       - name: install.sh --check
-        run: ./install.sh --check 2>&1 | tee check.log
+        run: ./install.sh --check --cluster "$CLUSTER" 2>&1 | tee check.log
       - name: install.sh
-        run: ./install.sh --yes --profile light 2>&1 | tee install.log
+        run: ./install.sh --yes --cluster "$CLUSTER" --profile light 2>&1 | tee install.log
       - name: verify
         run: |
           set -euo pipefail
@@ -68,18 +79,28 @@ jobs:
           test "$(kubectl -n rekognitor get pods --no-headers | grep -vc ' Running ')" -eq 0
           curl -fsS http://127.0.0.1:31881/healthz
           curl -fsS http://127.0.0.1:31881/rtsp/health
+          timeout 5 bash -c '</dev/tcp/127.0.0.1/31883'   # MQTT NodePort
+          kubectl -n rekognitor get svc streamer mqtt -o jsonpath='{range .items[*]}{.metadata.name} {.spec.type}{"\n"}{end}' >svc.txt
+          cat svc.txt
+          ! grep -q LoadBalancer svc.txt
+          kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' | grep -q k0s
           test "$(stat -c %a ~/.rekognitor/secrets)" = 600
           ! kubectl -n rekognitor get statefulset streamer -o yaml | grep -q set-by-installer
       - name: install.sh again (upgrade)
-        run: ./install.sh --yes 2>&1 | tee upgrade.log
+        run: ./install.sh --yes --cluster "$CLUSTER" 2>&1 | tee upgrade.log
       - name: uninstall.sh
         run: ./uninstall.sh --yes 2>&1 | tee uninstall.log
       - name: verify removal
         run: |
           set -euo pipefail
-          test ! -e /usr/local/bin/k3s
           test ! -e ~/.rekognitor
-          ! systemctl is-active --quiet k3s
+          if [[ $CLUSTER == k0s ]]; then
+            test ! -e /usr/local/bin/k0s
+            ! systemctl is-active --quiet k0scontroller
+          else
+            ! docker container inspect rekognitor-k0s >/dev/null 2>&1
+            ! docker volume inspect rekognitor-k0s >/dev/null 2>&1
+          fi
       - name: diagnostics
         if: failure()
         run: |
@@ -90,10 +111,12 @@ jobs:
           for p in $(kubectl -n rekognitor get pods -o name); do
             kubectl -n rekognitor describe "$p"; kubectl -n rekognitor logs "$p" --all-containers --tail=100
           done
+          sudo journalctl -u k0scontroller --no-pager | tail -80
+          docker logs rekognitor-k0s 2>&1 | tail -80
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: linux-logs
+          name: linux-logs-${{ matrix.cluster }}
           path: '*.log'
 
   macos:

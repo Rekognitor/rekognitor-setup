@@ -1,0 +1,5 @@
+# Todos os perfis: o broker é exposto por NodePort (k0s não tem LoadBalancer).
+#   31883 = MQTT/TCP (câmeras e integrações)   31882 = MQTT over WebSocket (navegador)
+mqtt:
+  service:
+    type: NodePort

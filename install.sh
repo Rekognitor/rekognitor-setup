@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Rekognitor installer for Linux and macOS (also used by install-windows.cmd inside WSL).
 #
-#   ./install.sh [--profile auto|light|full] [--cluster auto|k3s|k3d|existing]
-#                        [--yes] [--check] [--timeout SECONDS]
+#   ./install.sh [--profile auto|light|full] [--cluster auto|k0s|k0s-docker|existing]
+#                [--yes] [--check] [--timeout SECONDS]
 #
-# Creates a single-node Kubernetes (Linux: k3s; macOS: k3d on Docker Desktop or
-# Colima), installs the rekognitor charts into namespace "rekognitor" and waits
-# until every pod is Ready. Idempotent: run it again to upgrade, or to start the
-# cluster again (macOS) after a reboot.
+# Creates a single-node k0s Kubernetes (the same k0s version on every platform:
+# Linux and WSL run it natively, macOS in the official k0sproject/k0s container
+# on Docker Desktop or Colima), installs the rekognitor charts into namespace
+# "rekognitor" and waits until every pod is Ready. Services are exposed as
+# NodePorts (k0s has no LoadBalancer): UI 31881, MQTT 31883, MQTT/WebSocket 31882.
+# Idempotent: run it again to upgrade, or to start the cluster again (macOS)
+# after a reboot.
 #
 # Everything it creates is recorded in ~/.rekognitor/state so uninstall.sh
 # removes exactly that and nothing it found already installed. Your
@@ -39,14 +42,17 @@ KCFG=$REK_HOME/kubeconfig
 NAMESPACE=rekognitor # the streamer's DETECT_SERVICES_URL hardcodes detect.rekognitor.svc
 CHARTS=${CHARTS:-"redis mqtt detect vision streamer"}
 CLUSTER_NAME=rekognitor
-UI_PORT=31881 # streamer NodePort (always works); 8085 = its LoadBalancer port
-# ports the stack publishes on the host
-APP_PORTS="8085 1883 1882 31881 31882"
+CONTAINER=rekognitor-k0s # --cluster k0s-docker
+API_PORT_DOCKER=16443    # host port of the k0s API in the container (127.0.0.1 only)
+UI_PORT=31881            # streamer NodePort
+MQTT_PORT=31883          # mqtt NodePort (TCP); 31882 = MQTT over WebSocket
+APP_PORTS="31881 31882 31883"
 
+# k0s pinned to the version the rekognitor.helm CI validates the charts on
+K0S_VERSION=${K0S_VERSION:-v1.37.1+k0s.0}
+K0S_IMAGE=${K0S_IMAGE:-docker.io/k0sproject/k0s:${K0S_VERSION/+/-}}
+LOCAL_PATH_VERSION=${LOCAL_PATH_VERSION:-v0.0.37}
 HELM_VERSION=${HELM_VERSION:-v3.21.4}
-K3D_VERSION=${K3D_VERSION:-v5.9.0}
-K3S_CHANNEL=${K3S_CHANNEL:-stable}
-K3S_VERSION=${K3S_VERSION:-}
 COLIMA_CPU=${COLIMA_CPU:-4}
 COLIMA_MEMORY=${COLIMA_MEMORY:-8}
 COLIMA_DISK=${COLIMA_DISK:-40}
@@ -70,8 +76,9 @@ Uso: $0 [opções]
   --profile auto|light|full   recursos dos serviços (padrão: auto)
                                 light: 1 réplica do detect, para máquinas com < 6 CPUs
                                 full : 3-5 réplicas do detect (autoscaling)
-  --cluster auto|k3s|k3d|existing
-                              auto: Linux=k3s, macOS=k3d (padrão)
+  --cluster auto|k0s|k0s-docker|existing
+                              auto (padrão): Linux/WSL = k0s, macOS = k0s-docker
+                              k0s-docker: k0s no contêiner oficial (Docker)
                               existing: usa o cluster do KUBECONFIG atual
   --timeout SEGUNDOS          espera máxima pelos pods (padrão: $TIMEOUT)
   --check                     só verifica os pré-requisitos, não instala nada
@@ -93,7 +100,7 @@ while (($#)); do
   shift
 done
 case $PROFILE in auto | light | full) ;; *) die "--profile deve ser auto, light ou full" ;; esac
-case $CLUSTER in auto | k3s | k3d | existing) ;; *) die "--cluster deve ser auto, k3s, k3d ou existing" ;; esac
+case $CLUSTER in auto | k0s | k0s-docker | existing) ;; *) die "--cluster deve ser auto, k0s, k0s-docker ou existing" ;; esac
 
 # ----------------------------------------------------------------- state ----
 state_get() { if [[ -f $STATE ]]; then sed -n "s/^$1=//p" "$STATE" | tail -1; fi; }
@@ -154,7 +161,7 @@ confirm() {
 kc() { KUBECONFIG=$KCFG kubectl "$@"; }
 k() { kc -n "$NAMESPACE" "$@"; }
 
-[[ $CLUSTER == auto ]] && { if [[ $PLAT == darwin ]]; then CLUSTER=k3d; else CLUSTER=k3s; fi; }
+[[ $CLUSTER == auto ]] && { if [[ $PLAT == darwin ]]; then CLUSTER=k0s-docker; else CLUSTER=k0s; fi; }
 PREV_CLUSTER=$(state_get CLUSTER)
 if [[ -n $PREV_CLUSTER && $PREV_CLUSTER != "$CLUSTER" ]]; then
   die "o Rekognitor já foi instalado aqui com --cluster $PREV_CLUSTER. Rode ./uninstall.sh antes de trocar para $CLUSTER."
@@ -174,20 +181,20 @@ preflight() {
   else warn "sem acesso a https://registry-1.docker.io (as imagens vêm do Docker Hub)"; fail=1; fi
 
   case $CLUSTER in
-    k3s)
-      [[ $PLAT == linux ]] || { warn "k3s só roda em Linux; no macOS use --cluster k3d"; fail=1; }
-      if [[ -d /run/systemd/system ]]; then ok "systemd ativo"; else warn "systemd não está ativo (o k3s precisa dele; no WSL habilite [boot] systemd=true)"; fail=1; fi
+    k0s)
+      [[ $PLAT == linux ]] || { warn "o k0s nativo só roda em Linux; no macOS use --cluster k0s-docker"; fail=1; }
+      if [[ -d /run/systemd/system ]]; then ok "systemd ativo"; else warn "systemd não está ativo (o k0s roda como serviço; no WSL habilite [boot] systemd=true)"; fail=1; fi
       if [[ -n $SUDO ]]; then
         have sudo || { warn "sudo não encontrado: rode como root"; fail=1; }
-        info "o k3s é instalado com sudo: sua senha pode ser pedida"
+        info "o k0s é instalado com sudo: sua senha pode ser pedida"
       fi
       ;;
-    k3d)
+    k0s-docker)
       if docker_ready; then ok "Docker: $(docker_desc)"
       elif [[ $PLAT == darwin ]]; then
         if have brew; then ok "Homebrew encontrado: Colima (Docker gratuito) será instalado"
         else warn "Docker não encontrado e sem Homebrew. Instale o Homebrew (https://brew.sh) ou o Docker Desktop e rode de novo"; fail=1; fi
-      else warn "Docker não está rodando (necessário para --cluster k3d)"; fail=1; fi
+      else warn "Docker não está rodando (necessário para --cluster k0s-docker)"; fail=1; fi
       ;;
     existing)
       if have kubectl && kubectl cluster-info >/dev/null 2>&1; then ok "cluster existente: $(kubectl config current-context)"
@@ -198,7 +205,7 @@ preflight() {
   # A fresh install needs the host ports free. On a re-run our own cluster holds them.
   if [[ -z $PREV_CLUSTER && $CLUSTER != existing ]]; then
     local p busy=""
-    for p in $APP_PORTS $([[ $CLUSTER == k3s ]] && echo 6443 10250); do port_in_use "$p" && busy="$busy $p"; done
+    for p in $APP_PORTS $(if [[ $CLUSTER == k0s ]]; then echo 6443 10250; else echo $API_PORT_DOCKER; fi); do port_in_use "$p" && busy="$busy $p"; done
     if [[ -n $busy ]]; then
       warn "portas já em uso:$busy (outro Kubernetes, Docker ou o próprio Rekognitor já rodando?)"
       fail=1
@@ -247,47 +254,57 @@ ensure_helm() {
   ok "helm $HELM_VERSION instalado em $BIN"
 }
 
-ensure_k3d() {
-  if have k3d; then ok "k3d: $(k3d version | head -1)"; return; fi
-  local sum
-  sum=$(curl -fsSL "https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION/checksums.txt" | awk -v f="k3d-$PLAT-$ARCH" '$2 ~ "/"f"$" {print $1}')
-  download "https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION/k3d-$PLAT-$ARCH" "$BIN/k3d" "$sum"
-  chmod +x "$BIN/k3d"
-  ok "k3d $K3D_VERSION instalado em $BIN"
-}
-
 # -------------------------------------------------------------- clusters ----
 wait_cluster() {
   info "aguardando o Kubernetes ficar pronto..."
-  local d
-  for _ in $(seq 90); do kc get nodes >/dev/null 2>&1 && break; sleep 2; done
+  local _i
+  for _i in $(seq 120); do kc get nodes 2>/dev/null | grep -q . && break; sleep 2; done
   kc wait --for=condition=Ready node --all --timeout=300s >/dev/null
-  for d in coredns local-path-provisioner; do
-    for _ in $(seq 60); do kc -n kube-system get deploy "$d" >/dev/null 2>&1 && break; sleep 2; done
-    kc -n kube-system rollout status deploy/"$d" --timeout=300s >/dev/null
-  done
-  ok "Kubernetes pronto: $(kc get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}')"
+  for _i in $(seq 90); do kc -n kube-system get deploy coredns >/dev/null 2>&1 && kc -n kube-system get ds kube-router >/dev/null 2>&1 && break; sleep 2; done
+  kc -n kube-system rollout status deploy/coredns --timeout=300s >/dev/null
+  kc -n kube-system rollout status ds/kube-router --timeout=300s >/dev/null
+  ok "Kubernetes pronto: k0s $(kc get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}')"
 }
 
-cluster_k3s() {
-  step "Kubernetes (k3s)"
-  if [[ -x /usr/local/bin/k3s ]]; then
-    ok "k3s já instalado: $(/usr/local/bin/k3s --version | head -1)"
-    $SUDO systemctl start k3s 2>/dev/null || true
-  else
-    info "instalando k3s (canal $K3S_CHANNEL${K3S_VERSION:+, versão $K3S_VERSION})..."
-    # traefik (ingress) is not used by rekognitor; servicelb serves the LoadBalancers,
-    # local-path the vision PVC and kube-router enforces the NetworkPolicies.
-    curl -sfL https://get.k3s.io | $SUDO env INSTALL_K3S_CHANNEL="$K3S_CHANNEL" ${K3S_VERSION:+INSTALL_K3S_VERSION="$K3S_VERSION"} \
-      sh -s - server --disable traefik --write-kubeconfig-mode 600 2>&1 | sed 's/^/    /'
-    state_set K3S_INSTALLED 1
-    ok "k3s instalado (serviço systemd: inicia sozinho com a máquina)"
+# k0s ships no StorageClass; vision's PVC needs one (same setup as the helm repo CI)
+ensure_storage() {
+  if kc get storageclass -o jsonpath='{range .items[*]}{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}{"\n"}{end}' 2>/dev/null | grep -q true; then
+    ok "StorageClass padrão: $(kc get storageclass -o name | head -1 | sed 's#.*/##')"
+    return
   fi
-  for _ in $(seq 60); do $SUDO test -f /etc/rancher/k3s/k3s.yaml && break; sleep 2; done
-  $SUDO cat /etc/rancher/k3s/k3s.yaml >"$KCFG"
+  kc apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_VERSION/deploy/local-path-storage.yaml" >/dev/null
+  kc patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' >/dev/null
+  kc -n local-path-storage rollout status deploy/local-path-provisioner --timeout=300s >/dev/null
+  ok "StorageClass padrão: local-path ($LOCAL_PATH_VERSION)"
+}
+
+cluster_k0s() {
+  step "Kubernetes (k0s $K0S_VERSION)"
+  if [[ -x /usr/local/bin/k0s ]]; then
+    ok "k0s já instalado: $(/usr/local/bin/k0s version)"
+    $SUDO /usr/local/bin/k0s start >/dev/null 2>&1 || true # no-op when it is running
+  else
+    info "baixando o k0s $K0S_VERSION..."
+    local sum
+    sum=$(curl -fsSL "https://github.com/k0sproject/k0s/releases/download/$K0S_VERSION/sha256sums.txt" |
+      awk -v f="*k0s-$K0S_VERSION-$ARCH" '$2 == f {print $1}')
+    [[ -n $sum ]] || die "checksum do k0s $K0S_VERSION ($ARCH) não encontrado"
+    download "https://github.com/k0sproject/k0s/releases/download/$K0S_VERSION/k0s-$K0S_VERSION-$ARCH" "$BIN/k0s.download" "$sum"
+    $SUDO install -m 755 "$BIN/k0s.download" /usr/local/bin/k0s
+    rm -f "$BIN/k0s.download"
+    # --single: controller + worker on this machine, no taints. kube-router (the
+    # default CNI) enforces the detect/vision NetworkPolicies.
+    $SUDO /usr/local/bin/k0s install controller --single
+    $SUDO /usr/local/bin/k0s start
+    state_set K0S_INSTALLED 1
+    ok "k0s instalado (serviço k0scontroller: inicia sozinho com a máquina)"
+  fi
+  local _i
+  for _i in $(seq 90); do $SUDO /usr/local/bin/k0s kubeconfig admin >"$KCFG" 2>/dev/null && break; sleep 2; done
+  [[ -s $KCFG ]] || die "o k0s não gerou o kubeconfig (veja: sudo k0s status; sudo journalctl -u k0scontroller)"
   chmod 600 "$KCFG"
-  have kubectl || ln -sf /usr/local/bin/k3s "$BIN/kubectl"
   wait_cluster
+  ensure_storage
 }
 
 ensure_docker_mac() {
@@ -311,34 +328,37 @@ ensure_docker_mac() {
   ok "Docker (Colima): $(docker_desc)"
 }
 
-cluster_k3d() {
-  step "Kubernetes (k3d)"
+cluster_k0s_docker() {
+  step "Kubernetes (k0s $K0S_VERSION em contêiner)"
   # a previous run started our Colima VM: point docker at it (and start it after a reboot)
-  local colima
+  local colima _i
   colima=$(state_get COLIMA_PROFILE)
   if [[ -n $colima ]]; then
     export DOCKER_HOST=unix://$HOME/.colima/$colima/docker.sock
     docker_ready || { info "iniciando a VM Colima '$colima'..."; colima start "$colima" 2>&1 | sed 's/^/    /'; }
   fi
   if [[ $PLAT == darwin ]]; then ensure_docker_mac; else docker_ready || die "Docker não está rodando"; fi
-  ensure_k3d
-  if k3d cluster list "$CLUSTER_NAME" >/dev/null 2>&1; then
-    ok "cluster k3d '$CLUSTER_NAME' já existe"
-    k3d cluster start "$CLUSTER_NAME" >/dev/null 2>&1 || true
+  if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+    ok "contêiner $CONTAINER já existe"
+    docker start "$CONTAINER" >/dev/null
   else
-    info "criando o cluster k3d '$CLUSTER_NAME'..."
-    # LoadBalancer ports go through k3d's proxy; NodePorts straight to the server.
-    k3d cluster create "$CLUSTER_NAME" --servers 1 --agents 0 --api-port 127.0.0.1:6550 \
-      -p "8085:8085@loadbalancer" -p "1883:1883@loadbalancer" -p "1882:1882@loadbalancer" \
-      -p "31881:31881@server:0" -p "31882:31882@server:0" \
-      --k3s-arg "--disable=traefik@server:0" ${K3S_IMAGE:+--image "$K3S_IMAGE"} \
-      --kubeconfig-update-default=false --kubeconfig-switch-context=false --wait --timeout 300s 2>&1 | sed 's/^/    /'
-    state_set K3D_CLUSTER "$CLUSTER_NAME"
-    ok "cluster k3d criado"
+    info "baixando $K0S_IMAGE e criando o contêiner $CONTAINER..."
+    # the official way to run k0s in Docker (docs.k0sproject.io: "Run k0s in Docker"),
+    # controller + worker in one container; NodePorts published on the host.
+    docker run -d --name "$CONTAINER" --hostname "$CLUSTER_NAME" --restart unless-stopped \
+      --privileged --cgroupns=host --tmpfs /run -v "$CONTAINER:/var/lib/k0s" \
+      -p "127.0.0.1:$API_PORT_DOCKER:6443" -p 31881:31881 -p 31882:31882 -p 31883:31883 \
+      "$K0S_IMAGE" k0s controller --enable-worker --no-taints >/dev/null
+    state_set K0S_CONTAINER "$CONTAINER"
+    ok "contêiner $CONTAINER criado (reinicia junto com o Docker)"
   fi
-  k3d kubeconfig get "$CLUSTER_NAME" >"$KCFG"
+  for _i in $(seq 90); do docker exec "$CONTAINER" k0s kubeconfig admin >"$KCFG" 2>/dev/null && break; sleep 2; done
+  [[ -s $KCFG ]] || die "o k0s do contêiner não gerou o kubeconfig (veja: docker logs $CONTAINER)"
+  # the kubeconfig points at the container IP: use the published port instead
+  sed "s#server: https://.*#server: https://127.0.0.1:$API_PORT_DOCKER#" "$KCFG" >"$KCFG.tmp" && mv "$KCFG.tmp" "$KCFG"
   chmod 600 "$KCFG"
   wait_cluster
+  ensure_storage
 }
 
 cluster_existing() {
@@ -400,14 +420,15 @@ deploy() {
   for chart in $CHARTS; do
     [[ -d $ROOT/charts/$chart ]] || die "chart $chart não encontrado em $ROOT/charts"
     args=""
-    [[ -f $ROOT/values/$PROFILE/$chart.yaml ]] && args="-f $ROOT/values/$PROFILE/$chart.yaml"
+    # common: NodePort services (k0s has no LoadBalancer); then the resource profile
+    [[ -f $ROOT/values/common/$chart.yaml ]] && args="-f $ROOT/values/common/$chart.yaml"
+    [[ -f $ROOT/values/$PROFILE/$chart.yaml ]] && args="$args -f $ROOT/values/$PROFILE/$chart.yaml"
     case $chart in
       streamer) args="$args --set-string env.CLIENT_ID=$CLIENT_ID,env.SECRET=$API_SECRET" ;;
       mqtt) args="$args --set-string dashboard.authSecret=$MQTT_AUTH_SECRET" ;;
     esac
     # the customer's own overrides, kept across upgrades: ~/.rekognitor/values/<chart>.yaml
     [[ -f $REK_HOME/values/$chart.yaml ]] && args="$args -f $REK_HOME/values/$chart.yaml"
-    # no --wait: helm would block forever on LoadBalancers without an external IP
     # shellcheck disable=SC2086
     KUBECONFIG=$KCFG helm upgrade --install "$chart" "$ROOT/charts/$chart" -n "$NAMESPACE" $args >/dev/null ||
       die "helm falhou ao instalar $chart"
@@ -473,7 +494,7 @@ EOF
   cat <<EOF
   Interface web    http://localhost:$UI_PORT
                    na rede: http://$ip:$UI_PORT
-  MQTT (câmeras)   $ip:1883   (WebSocket: $ip:1882)
+  MQTT (câmeras)   $ip:$MQTT_PORT   (WebSocket: $ip:31882)
   Perfil           $PROFILE
 
   Login da interface (guarde em local seguro; ficam em $SECRETS)
@@ -485,9 +506,9 @@ EOF
     $ROOT/install.sh      atualizar / reiniciar
     $ROOT/uninstall.sh    desinstalar
 EOF
-  if [[ $CLUSTER == k3d && $PLAT == darwin ]]; then
+  if [[ $CLUSTER == k0s-docker && -n $(state_get COLIMA_PROFILE) ]]; then
     echo
-    warn "macOS: após reiniciar o Mac, rode o install.sh de novo para religar o Rekognitor."
+    warn "após reiniciar o computador, rode o install.sh de novo para religar o Colima e o Rekognitor."
   fi
 }
 
@@ -511,16 +532,17 @@ if [[ -z $PREV_CLUSTER ]]; then
   info "$CHARTS no namespace '$NAMESPACE'."
   confirm "Continuar?" || die "cancelado"
 fi
-[[ $CLUSTER == k3s && -n $SUDO ]] && { sudo -v || die "sudo é necessário para instalar o k3s"; }
+[[ $CLUSTER == k0s && -n $SUDO ]] && { sudo -v || die "sudo é necessário para instalar o k0s"; }
 
 state_set CLUSTER "$CLUSTER"
 state_set ROOT "$ROOT"
 step "Ferramentas"
 ensure_helm
+ensure_kubectl
 case $CLUSTER in
-  k3s) cluster_k3s ;;
-  k3d) ensure_kubectl; cluster_k3d ;;
-  existing) ensure_kubectl; cluster_existing ;;
+  k0s) cluster_k0s ;;
+  k0s-docker) cluster_k0s_docker ;;
+  existing) cluster_existing ;;
 esac
 pick_profile
 deploy

@@ -2,7 +2,7 @@
 #
 # Removes what install.ps1 created (recorded in %ProgramData%\Rekognitor\state.json):
 # the "Rekognitor" logon task, port forwards, firewall rules, desktop shortcut and
-# the "Rekognitor" WSL distribution, which holds k3s, the services and the enrolled
+# the "Rekognitor" WSL distribution, which holds k0s, the services and the enrolled
 # faces. WSL itself and your other distributions are left installed.
 [CmdletBinding()]
 param(
@@ -17,7 +17,7 @@ $Distro    = 'Rekognitor'
 $TaskName  = 'Rekognitor'
 $Home_     = Join-Path $env:ProgramData 'Rekognitor'
 $StateFile = Join-Path $Home_ 'state.json'
-$Ports     = @(8085, 1883, 1882, 31881, 31882)
+$Ports     = @(31881, 31882, 31883)   # NodePorts: UI, MQTT/WebSocket, MQTT
 
 function Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }

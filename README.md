@@ -1,8 +1,15 @@
+<p align="center">
+  <img src="docs/img/logo.png" alt="Rekognitor — Vision Intelligence" width="560">
+</p>
+
 # rekognitor-setup
 
 Instaladores do **Rekognitor** para Windows, Linux e macOS. Cada um instala a solução completa numa única máquina: Kubernetes **k0s** (a mesma versão em todos os sistemas) + streamer, detect, vision, mqtt e redis.
 
-📖 **[Manual de instalação completo](docs/MANUAL.md)** · 📄 **[versão em PDF](docs/MANUAL.pdf)**
+| Manual | Para quem | Onde |
+| --- | --- | --- |
+| 📖 **Manual de instalação** | quem instala e mantém o Rekognitor | [online](docs/MANUAL.md) · [PDF](docs/MANUAL.pdf) |
+| 📘 **Manual de uso** | quem usa o sistema no dia a dia: acesso, câmeras, eventos, rostos e relatórios | [PDF](docs/Manual-de-Uso-Rekognitor.pdf) |
 
 ## Instalação rápida
 

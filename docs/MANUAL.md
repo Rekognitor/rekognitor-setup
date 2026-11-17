@@ -29,18 +29,26 @@ O instalador cria um Kubernetes de **um único nó** na própria máquina e inst
 | Serviço | Função |
 | --- | --- |
 | **streamer** | Interface web e API. Lê as câmeras (RTSP) e publica as detecções |
-| **detect** | Detecção de objetos (modelos RT-DETR e YOLO) |
+| **detect** | Detecção de objetos (RT-DETR) |
 | **vision** | Reconhecimento facial e base de rostos cadastrados |
 | **mqtt** | Broker MQTT para onde as detecções são publicadas (`cameras/<id>`) |
 | **redis** | Guarda as configurações feitas pela interface |
 
-O Kubernetes muda conforme o sistema:
+O Kubernetes é o **k0s**, na **mesma versão em todos os sistemas** (v1.37.1+k0s.0). Muda só onde ele roda:
 
-| Sistema | Kubernetes | Como roda |
-| --- | --- | --- |
-| Windows 10/11 | k3s | dentro de uma distribuição WSL2 exclusiva, chamada `Rekognitor` |
-| Linux | k3s | nativo, como serviço do systemd |
-| macOS | k3d (k3s em contêiner) | sobre o Docker Desktop, ou sobre o Colima (gratuito, instalado pelo Homebrew) |
+| Sistema | Onde o k0s roda |
+| --- | --- |
+| Linux | direto na máquina, como serviço do systemd (`k0scontroller`) |
+| Windows 10/11 | direto numa distribuição WSL2 exclusiva, chamada `Rekognitor` |
+| macOS | no contêiner oficial do k0s (`k0sproject/k0s`), sobre o Docker Desktop ou o Colima (gratuito, instalado pelo Homebrew). O macOS não tem kernel Linux, então o k0s precisa de um contêiner |
+
+Os serviços ficam acessíveis pelas mesmas portas em todos os sistemas:
+
+| Porta | Uso |
+| --- | --- |
+| 31881 | interface web e API |
+| 31883 | MQTT (câmeras e integrações) |
+| 31882 | MQTT por WebSocket (usado pela interface) |
 
 O instalador anota tudo o que criou. O desinstalador remove **somente** essas coisas: um Kubernetes ou Docker que já existia na máquina continua lá.
 
@@ -52,7 +60,7 @@ O instalador anota tudo o que criou. O desinstalador remove **somente** essas co
 | Memória | 4 GB (Windows: 6 GB) | 8 GB ou mais |
 | Disco livre | 15 GB (Windows: 20 GB) | 30 GB |
 | Internet | acesso ao Docker Hub (`registry-1.docker.io`) e ao GitHub | |
-| Portas livres | 8085, 1883, 1882, 31881, 31882 | |
+| Portas livres | 31881, 31882, 31883 (no Linux e no Windows, também 6443 e 10250, usadas pelo k0s) | |
 
 Requisitos de cada sistema:
 
@@ -122,7 +130,7 @@ Se aparecer algum item com `[!]`, veja a [Solução de problemas](#12-solução-
 5. O instalador então:
    - baixa o Ubuntu 24.04 (cerca de 350 MB, com o checksum conferido) e cria a distribuição WSL `Rekognitor`;
    - cria a tarefa agendada **Rekognitor**, que mantém o Rekognitor ligado sempre que você faz login no Windows;
-   - instala o k3s e os serviços. O primeiro download das imagens leva de **5 a 15 minutos**, dependendo da internet.
+   - instala o k0s e os serviços. O primeiro download das imagens leva de **5 a 15 minutos**, dependendo da internet.
 6. No final, aparece o resumo com o endereço da interface e as **credenciais de acesso**, o navegador abre a interface, e é criado o atalho **Rekognitor** na Área de Trabalho.
 
 > As suas outras distribuições WSL e o arquivo `.wslconfig` **não são alterados**.
@@ -135,7 +143,7 @@ Por padrão, a interface só é acessível pelo próprio computador (`http://loc
 install-windows.cmd -AllowLan
 ```
 
-Isso cria regras no Firewall do Windows (grupo **Rekognitor**) para as portas 8085, 1883, 1882, 31881 e 31882. Se o Rekognitor já estiver instalado, rodar esse comando de novo só aplica a mudança.
+Isso cria regras no Firewall do Windows (grupo **Rekognitor**) para as portas 31881, 31882 e 31883. Se o Rekognitor já estiver instalado, rodar esse comando de novo só aplica a mudança.
 
 ### 4.4 Parâmetros do instalador Windows
 
@@ -166,10 +174,11 @@ cd rekognitor-setup
 ./install.sh
 ```
 
-1. Confirme com `s`. A senha do `sudo` pode ser pedida, porque o k3s é instalado como serviço do sistema.
+1. Confirme com `s`. A senha do `sudo` pode ser pedida, porque o k0s é instalado como serviço do sistema.
 2. O instalador:
-   - instala o **k3s** (sem o Traefik) como serviço `k3s` do systemd, que inicia sozinho com a máquina;
-   - baixa o `helm` para `~/.rekognitor/bin` se ele não existir, conferindo o checksum;
+   - baixa o **k0s** v1.37.1+k0s.0, conferindo o checksum, e o instala como serviço `k0scontroller` do systemd (controlador e worker na mesma máquina), que inicia sozinho com a máquina;
+   - instala o `local-path-provisioner` como StorageClass padrão, para guardar os rostos cadastrados;
+   - baixa o `kubectl` e o `helm` para `~/.rekognitor/bin` se eles não existirem, conferindo os checksums;
    - instala os serviços e espera todos ficarem prontos;
    - testa a interface e a conexão com o detect e o vision.
 3. No final, aparece o resumo com o endereço da interface e as credenciais.
@@ -193,9 +202,9 @@ No Linux, as portas já ficam acessíveis pela rede. Se a máquina usa firewall 
 
 ```bash
 # ufw (Ubuntu)
-sudo ufw allow 31881,8085,1883,1882,31882/tcp
+sudo ufw allow 31881:31883/tcp
 # firewalld (RHEL/Rocky/Alma)
-sudo firewall-cmd --permanent --add-port={31881,8085,1883,1882,31882}/tcp && sudo firewall-cmd --reload
+sudo firewall-cmd --permanent --add-port=31881-31883/tcp && sudo firewall-cmd --reload
 ```
 
 ## 6. Instalação no macOS
@@ -210,12 +219,14 @@ sudo firewall-cmd --permanent --add-port={31881,8085,1883,1882,31882}/tcp && sud
 
 3. Confirme com `s`. O instalador:
    - usa o Docker que estiver rodando. Se não houver nenhum, instala o **Colima** e o cliente `docker` pelo Homebrew e cria a VM `rekognitor` (4 CPUs, 8 GB e 40 GB de disco; ajustável com `COLIMA_CPU`, `COLIMA_MEMORY` e `COLIMA_DISK`);
-   - baixa `k3d`, `kubectl` e `helm` para `~/.rekognitor/bin`, conferindo os checksums;
-   - cria o cluster k3d `rekognitor`, com as portas publicadas no Mac, e instala os serviços.
+   - baixa `kubectl` e `helm` para `~/.rekognitor/bin`, conferindo os checksums;
+   - cria o contêiner `rekognitor-k0s` com o k0s v1.37.1+k0s.0 (imagem oficial `k0sproject/k0s`), com as portas 31881–31883 publicadas no Mac, e instala os serviços.
+
+O contêiner reinicia junto com o Docker.
 
 No Docker Desktop, reserve pelo menos **4 CPUs e 8 GB** em *Settings → Resources*.
 
-> **Depois de reiniciar o Mac**, rode `./install.sh` de novo. Ele religa a VM e o cluster sem reinstalar nada.
+> **Depois de reiniciar o Mac**, abra o Docker Desktop (o Rekognitor volta sozinho). Se usar o Colima, rode `./install.sh` de novo: ele religa a VM e o k0s sem reinstalar nada.
 
 ## 7. Primeiro acesso
 
@@ -237,16 +248,16 @@ As credenciais são geradas **na instalação, uma para cada máquina**, e não 
 
 - As câmeras são cadastradas na interface, com o endereço RTSP de cada uma. O Rekognitor é quem se conecta às câmeras, então elas precisam estar acessíveis a partir desta máquina.
 - As detecções são publicadas no broker MQTT, no tópico `cameras/<id-da-câmera>`:
-  - MQTT/TCP: `<IP-da-máquina>:1883`
-  - MQTT por WebSocket: `<IP-da-máquina>:1882`
+  - MQTT/TCP: `<IP-da-máquina>:31883`
+  - MQTT por WebSocket: `<IP-da-máquina>:31882`
 
   Teste com o `mosquitto_sub`:
 
   ```bash
-  mosquitto_sub -h <IP-da-máquina> -p 1883 -t 'cameras/#' -v
+  mosquitto_sub -h <IP-da-máquina> -p 31883 -t 'cameras/#' -v
   ```
 
-- O broker aceita conexões **anônimas**. Não exponha a porta 1883 para a internet.
+- O broker aceita conexões **anônimas**. Não exponha a porta 31883 para a internet.
 - Há um painel do broker (usuário `admin`, senha `rekognitor-admin`), acessível só de dentro do cluster:
 
   ```bash
@@ -286,8 +297,8 @@ kubectl -n rekognitor rollout restart statefulset/streamer
 
 **Ligar e desligar:**
 
-- Linux: o serviço `k3s` liga com a máquina (`sudo systemctl stop k3s` / `start k3s`).
-- macOS: `./install.sh` religa tudo; para desligar, `k3d cluster stop rekognitor` e, se usar o Colima, `colima stop rekognitor`.
+- Linux: o serviço `k0scontroller` liga com a máquina (`sudo k0s stop` / `sudo k0s start`).
+- macOS: o contêiner liga com o Docker; para desligar, `docker stop rekognitor-k0s` e, se usar o Colima, `colima stop rekognitor`. `./install.sh` religa tudo.
 - Windows: a tarefa **Rekognitor** liga tudo no login. Para desligar até o próximo login: `schtasks /End /TN Rekognitor` e depois `wsl --terminate Rekognitor`.
 
 ## 10. Desinstalar
@@ -302,7 +313,7 @@ kubectl -n rekognitor rollout restart statefulset/streamer
 ./uninstall.sh
 ```
 
-São removidos os serviços, o k3s (se foi o instalador que o instalou), o cluster k3d e a VM Colima criados por ele, os pacotes Homebrew que ele adicionou e a pasta `~/.rekognitor`.
+São removidos os serviços, o k0s (`k0s reset`, se foi o instalador que o instalou), o contêiner `rekognitor-k0s` e o volume dele, a VM Colima e os pacotes Homebrew que o instalador adicionou, e a pasta `~/.rekognitor`. No Linux, o k0s recomenda reiniciar a máquina depois, para limpar regras de rede que restarem.
 
 Para remover **só o Rekognitor** e manter o Kubernetes:
 
@@ -335,15 +346,15 @@ Depois rode `./install.sh` de novo.
 
 **Docker Hub com login:** para evitar o limite de downloads anônimos, rode com `DOCKERHUB_USERNAME=... DOCKERHUB_TOKEN=... ./install.sh`.
 
-**Versões:** dá para fixar as versões com as variáveis `K3S_VERSION` (ex.: `v1.37.2+k3s1`), `K3S_CHANNEL`, `HELM_VERSION`, `K3D_VERSION` e `K3S_IMAGE` (k3d).
+**Versões:** o padrão é o k0s v1.37.1+k0s.0, a versão em que os serviços são validados. Dá para trocar com as variáveis `K0S_VERSION` (ex.: `v1.37.2+k0s.1`), `K0S_IMAGE` (macOS), `HELM_VERSION` e `LOCAL_PATH_VERSION`.
 
 ## 12. Solução de problemas
 
 | Sintoma | Causa provável / solução |
 | --- | --- |
-| `portas já em uso` | Outro Kubernetes, Docker Desktop ou um Rekognitor antigo está usando as portas. Pare ou remova o outro serviço. No Windows, verifique outras distribuições WSL com k3s (`wsl -l -v`). |
+| `portas já em uso` | Outro Kubernetes, Docker Desktop ou um Rekognitor antigo está usando as portas. Pare ou remova o outro serviço. No Windows, verifique outras distribuições WSL com Kubernetes (`wsl -l -v`). |
 | `virtualização desabilitada` (Windows) | Habilite Intel VT-x / AMD-V na BIOS/UEFI do computador. |
-| `systemd não está ativo` (Linux) | O k3s precisa do systemd. Em WSL próprio, adicione `[boot]` `systemd=true` em `/etc/wsl.conf`. |
+| `systemd não está ativo` (Linux) | O k0s precisa do systemd. Em WSL próprio, adicione `[boot]` `systemd=true` em `/etc/wsl.conf`. |
 | `serviços não ficaram prontos em 1200s` | Normalmente é um download lento ou bloqueado das imagens. Rode o instalador de novo, que continua de onde parou, ou aumente com `--timeout 2400`. Veja o motivo com `kubectl -n rekognitor get pods` e `kubectl -n rekognitor describe pod <nome>`. |
 | Pod em `ImagePullBackOff` | Sem acesso ao Docker Hub, ou o limite de downloads foi atingido (use `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`). |
 | Pod em `Pending` | Faltam CPU ou memória. Use `--profile light` ou dê mais recursos ao Docker/Colima. |

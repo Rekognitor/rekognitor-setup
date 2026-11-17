@@ -1,6 +1,6 @@
 # rekognitor-setup
 
-Instaladores do **Rekognitor** para Windows, Linux e macOS. Cada um instala a solução completa numa única máquina: Kubernetes (k3s) + streamer, detect, vision, mqtt e redis.
+Instaladores do **Rekognitor** para Windows, Linux e macOS. Cada um instala a solução completa numa única máquina: Kubernetes **k0s** (a mesma versão em todos os sistemas) + streamer, detect, vision, mqtt e redis.
 
 📖 **[Manual de instalação completo](docs/MANUAL.md)** · 📄 **[versão em PDF](docs/MANUAL.pdf)**
 
@@ -26,11 +26,15 @@ Requisitos mínimos: 2 CPUs (recomendado 4+), 4 GB de RAM (recomendado 8 GB), 15
 
 ## Como funciona
 
-| Sistema | Kubernetes |
+Todos usam o k0s v1.37.1+k0s.0, a versão em que o CI do `rekognitor.helm` valida os charts:
+
+| Sistema | Onde o k0s roda |
 | --- | --- |
-| Windows | k3s numa distribuição WSL2 exclusiva (`Rekognitor`), mantida ligada por uma tarefa agendada no login |
-| Linux | k3s nativo (serviço systemd) |
-| macOS | k3d sobre o Docker Desktop, ou sobre o Colima instalado pelo Homebrew |
+| Linux | nativo (serviço systemd `k0scontroller`) |
+| Windows | nativo numa distribuição WSL2 exclusiva (`Rekognitor`), mantida ligada por uma tarefa agendada no login |
+| macOS | no contêiner oficial `k0sproject/k0s`, sobre o Docker Desktop ou o Colima instalado pelo Homebrew |
+
+Portas iguais em todos os sistemas: interface **31881**, MQTT **31883** e MQTT/WebSocket **31882**.
 
 Os instaladores podem ser rodados de novo: rodar outra vez atualiza o Rekognitor. Eles registram tudo o que criam (`~/.rekognitor/state` ou `C:\ProgramData\Rekognitor\state.json`), e os desinstaladores removem somente isso.
 

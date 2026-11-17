@@ -2,7 +2,7 @@
 
 Este manual mostra como instalar, atualizar e desinstalar o Rekognitor em **Windows**, **Linux** e **macOS**, usando os instaladores deste repositório.
 
-> **Sobre as imagens:** todas as imagens deste manual são saídas reais dos instaladores e da interface do Rekognitor. As telas do próprio Windows (UAC, SmartScreen) são descritas em texto.
+> **Sobre as imagens:** todas as imagens deste manual são saídas reais dos instaladores e da interface do Rekognitor. As instalações completas foram feitas num Ubuntu 24.04 com 4 CPUs (máquina de testes do CI), com credenciais de teste. As telas do próprio Windows (UAC, SmartScreen) são descritas em texto.
 
 ## Sumário
 
@@ -61,6 +61,8 @@ O instalador anota tudo o que criou. O desinstalador remove **somente** essas co
 | Disco livre | 15 GB (Windows: 20 GB) | 30 GB |
 | Internet | acesso ao Docker Hub (`registry-1.docker.io`) e ao GitHub | |
 | Portas livres | 31881, 31882, 31883 (no Linux e no Windows, também 6443 e 10250, usadas pelo k0s) | |
+
+**Credenciais da API:** tenha em mãos o **CLIENT_ID** e o **SECRET** fornecidos pela Rekognitor para o seu contrato. O instalador pede os dois durante a instalação.
 
 Requisitos de cada sistema:
 
@@ -126,12 +128,13 @@ Se aparecer algum item com `[!]`, veja a [Solução de problemas](#12-solução-
    - Se o Windows mostrar **"O Windows protegeu o computador"** (SmartScreen), clique em **Mais informações → Executar assim mesmo**. Para evitar o aviso, antes de extrair clique com o botão direito no ZIP → **Propriedades** → marque **Desbloquear** → **OK**.
 2. Na janela **Controle de Conta de Usuário**, clique em **Sim**. O instalador precisa de permissão de administrador.
 3. O instalador verifica a máquina e mostra o que vai fazer. Digite `s` e Enter para continuar.
-4. **Se o WSL não estiver instalado**, o instalador o instala e pede para **reiniciar o Windows**. Depois do login, a instalação **continua sozinha**: aceite de novo o pedido de administrador.
-5. O instalador então:
+4. Digite o **CLIENT_ID** e o **SECRET** fornecidos pela Rekognitor, cada um duas vezes. O que você digita **não aparece na tela** (veja a [seção 7.1](#71-credenciais-da-api)).
+5. **Se o WSL não estiver instalado**, o instalador o instala e pede para **reiniciar o Windows**. Depois do login, a instalação **continua sozinha**: aceite de novo o pedido de administrador.
+6. O instalador então:
    - baixa o Ubuntu 24.04 (cerca de 350 MB, com o checksum conferido) e cria a distribuição WSL `Rekognitor`;
    - cria a tarefa agendada **Rekognitor**, que mantém o Rekognitor ligado sempre que você faz login no Windows;
    - instala o k0s e os serviços. O primeiro download das imagens leva de **5 a 15 minutos**, dependendo da internet.
-6. No final, aparece o resumo com o endereço da interface e as **credenciais de acesso**, o navegador abre a interface, e é criado o atalho **Rekognitor** na Área de Trabalho.
+7. No final, aparece o resumo com o endereço da interface, o navegador abre a interface, e é criado o atalho **Rekognitor** na Área de Trabalho. As credenciais não são exibidas.
 
 > As suas outras distribuições WSL e o arquivo `.wslconfig` **não são alterados**.
 
@@ -163,6 +166,8 @@ Isso cria regras no Firewall do Windows (grupo **Rekognitor**) para as portas 31
 ./install.sh --check
 ```
 
+![Verificação de pré-requisitos no Linux](img/linux-check.png)
+
 A verificação para se alguma porta estiver ocupada, por exemplo por outro Kubernetes já instalado:
 
 ![Verificação no Linux acusando portas em uso](img/linux-check-erro-portas.png)
@@ -175,22 +180,32 @@ cd rekognitor-setup
 ```
 
 1. Confirme com `s`. A senha do `sudo` pode ser pedida, porque o k0s é instalado como serviço do sistema.
-2. O instalador:
+2. Digite o **CLIENT_ID** e o **SECRET** fornecidos pela Rekognitor, cada um duas vezes. O que você digita não aparece na tela (veja a [seção 7.1](#71-credenciais-da-api)).
+3. O instalador:
    - baixa o **k0s** v1.37.1+k0s.0, conferindo o checksum, e o instala como serviço `k0scontroller` do systemd (controlador e worker na mesma máquina), que inicia sozinho com a máquina;
    - instala o `local-path-provisioner` como StorageClass padrão, para guardar os rostos cadastrados;
    - baixa o `kubectl` e o `helm` para `~/.rekognitor/bin` se eles não existirem, conferindo os checksums;
-   - instala os serviços e espera todos ficarem prontos;
-   - testa a interface e a conexão com o detect e o vision.
-3. No final, aparece o resumo com o endereço da interface e as credenciais.
+   - grava as credenciais num Secret do k0s, instala os serviços e espera todos ficarem prontos;
+   - testa a interface, a conexão com o detect e o vision e o login com as credenciais.
+4. No final, aparece o resumo com o endereço da interface. As credenciais não são exibidas.
 
-Para usar `kubectl` e `helm` com o cluster do Rekognitor:
+Uma instalação completa, do início:
+
+![Instalação no Linux: pré-requisitos, ferramentas e k0s](img/linux-instalacao-1.png)
+
+E a continuação, com os serviços, o teste da aplicação e o resumo final:
+
+![Instalação no Linux: serviços, testes e resumo](img/linux-instalacao-2.png)
+
+No Windows, o instalador roda exatamente esse mesmo processo dentro da distribuição WSL `Rekognitor`.
+
+Para consultar o cluster, use o `kubectl` do próprio k0s, com sudo:
 
 ```bash
-source ~/.rekognitor/env
-kubectl -n rekognitor get pods
+sudo k0s kubectl -n rekognitor get pods
 ```
 
-O instalador **não mexe** no seu `~/.kube/config`.
+O acesso de administrador ao k0s fica restrito a quem tem `sudo`: o instalador não deixa nenhum kubeconfig de administrador na sua pasta, e não mexe no seu `~/.kube/config`.
 
 Todas as opções:
 
@@ -217,12 +232,14 @@ sudo firewall-cmd --permanent --add-port=31881-31883/tcp && sudo firewall-cmd --
    ./install.sh
    ```
 
-3. Confirme com `s`. O instalador:
+3. Confirme com `s` e digite o **CLIENT_ID** e o **SECRET** fornecidos pela Rekognitor (não aparecem na tela). O instalador:
    - usa o Docker que estiver rodando. Se não houver nenhum, instala o **Colima** e o cliente `docker` pelo Homebrew e cria a VM `rekognitor` (4 CPUs, 8 GB e 40 GB de disco; ajustável com `COLIMA_CPU`, `COLIMA_MEMORY` e `COLIMA_DISK`);
    - baixa `kubectl` e `helm` para `~/.rekognitor/bin`, conferindo os checksums;
    - cria o contêiner `rekognitor-k0s` com o k0s v1.37.1+k0s.0 (imagem oficial `k0sproject/k0s`), com as portas 31881–31883 publicadas no Mac, e instala os serviços.
 
-O contêiner reinicia junto com o Docker.
+O contêiner reinicia junto com o Docker. A criação do k0s em contêiner fica assim; daí em diante, a saída é igual à do Linux:
+
+![k0s em contêiner](img/k0s-docker-instalacao.png)
 
 No Docker Desktop, reserve pelo menos **4 CPUs e 8 GB** em *Settings → Resources*.
 
@@ -232,17 +249,35 @@ No Docker Desktop, reserve pelo menos **4 CPUs e 8 GB** em *Settings → Resourc
 
 1. Abra **<http://localhost:31881>**. No Windows, use também o atalho **Rekognitor** da Área de Trabalho. Pela rede, use `http://<IP-da-máquina>:31881`.
 2. Na tela de login, preencha:
-   - **Identificação do cliente:** o `CLIENT_ID` mostrado no final da instalação;
-   - **Chave de acesso:** o `SECRET` mostrado no final da instalação.
+   - **Identificação do cliente:** o seu `CLIENT_ID`;
+   - **Chave de acesso:** o seu `SECRET`.
 
 ![Tela de login do Rekognitor](img/interface-login.png)
 
-As credenciais são geradas **na instalação, uma para cada máquina**, e não mudam nas atualizações. Para consultá-las depois:
+### 7.1 Credenciais da API
 
-| Sistema | Onde estão |
-| --- | --- |
-| Linux / macOS | `cat ~/.rekognitor/secrets` |
-| Windows | `C:\ProgramData\Rekognitor\credenciais.txt` (só o seu usuário e os administradores leem), ou `wsl -d Rekognitor cat /root/.rekognitor/secrets` |
+O **CLIENT_ID** e o **SECRET** são emitidos pela Rekognitor para cada cliente. O instalador **não gera** credenciais e as protege assim:
+
+- **Pedidas sem eco:** o instalador pede cada valor duas vezes, para evitar erro de digitação, e nada do que você digita aparece na tela.
+
+  ![Pedido das credenciais: nada do que é digitado aparece](img/credenciais-prompt.png)
+
+- **Não aparecem em lugar nenhum:** os valores não são exibidos no resumo, não aparecem em linhas de comando (onde outros usuários da máquina poderiam vê-los) e não são gravados em arquivos.
+- **Guardadas num Secret do Kubernetes:** os valores vão direto para o Secret `rekognitor-credentials`, no namespace `rekognitor` do k0s. O streamer lê o Secret ao iniciar, então as credenciais também não aparecem na configuração dos serviços.
+- **Só administradores do k0s leem:** no Linux, quem tem `sudo`. No Windows, o seu usuário, que é o dono da distribuição `Rekognitor`. No macOS, quem tem acesso ao Docker.
+- **Login conferido:** no fim da instalação, o instalador confere se o streamer aceita as credenciais.
+
+**Trocar as credenciais** (por exemplo, quando a Rekognitor emitir novas): rode o instalador com a opção abaixo. Ele pede os novos valores, atualiza o Secret e reinicia o streamer.
+
+```bash
+./install.sh --update-credentials                 # Linux / macOS
+```
+
+```bat
+wsl -d Rekognitor bash /opt/rekognitor/install.sh --update-credentials
+```
+
+**Instalação automatizada** (sem ninguém digitando): defina as variáveis de ambiente `REKOGNITOR_CLIENT_ID` e `REKOGNITOR_SECRET` antes de rodar o instalador. No Windows, defina as variáveis na mesma janela antes de rodar o `install-windows.cmd`. Elas são repassadas ao WSL pelo ambiente, e não pela linha de comando.
 
 ## 8. Conectar câmeras e sistemas (MQTT)
 
@@ -261,8 +296,7 @@ As credenciais são geradas **na instalação, uma para cada máquina**, e não 
 - Há um painel do broker (usuário `admin`, senha `rekognitor-admin`), acessível só de dentro do cluster:
 
   ```bash
-  source ~/.rekognitor/env     # Windows: wsl -d Rekognitor
-  kubectl -n rekognitor port-forward svc/mqtt-dashboard 8080:8080
+  sudo k0s kubectl -n rekognitor port-forward svc/mqtt-dashboard 8080:8080
   # abra http://localhost:8080/dashboard/
   ```
 
@@ -273,26 +307,26 @@ As credenciais são geradas **na instalação, uma para cada máquina**, e não 
 1. Baixe o repositório de novo (ZIP ou `git pull`).
 2. Rode o instalador de novo: `./install.sh` ou `install-windows.cmd`.
 
-A atualização mantém as credenciais, os rostos cadastrados e as configurações. As imagens dos serviços usam a tag `latest`, então cada reinstalação baixa a versão mais recente.
+A atualização mantém as credenciais (não são pedidas de novo), os rostos cadastrados e as configurações. As imagens dos serviços usam a tag `latest`, então cada reinstalação baixa a versão mais recente. O k0s já instalado é reaproveitado:
+
+![Atualização: o k0s é reaproveitado](img/linux-atualizacao.png)
 
 **Verificar** se está tudo rodando:
 
-```bash
-# Linux / macOS
-source ~/.rekognitor/env && kubectl -n rekognitor get pods
-```
+| Sistema | Comando |
+| --- | --- |
+| Linux | `sudo k0s kubectl -n rekognitor get pods` |
+| Windows | `wsl -d Rekognitor k0s kubectl -n rekognitor get pods` |
+| macOS | `docker exec rekognitor-k0s k0s kubectl -n rekognitor get pods` |
 
-```bat
-:: Windows
-wsl -d Rekognitor kubectl -n rekognitor get pods
-```
+Nos exemplos abaixo, `sudo k0s kubectl` é a forma do Linux. No Windows e no macOS, use o comando equivalente da tabela.
 
 Todos os pods devem aparecer como `Running` e `1/1`.
 
 **Reiniciar um serviço**, por exemplo o streamer:
 
 ```bash
-kubectl -n rekognitor rollout restart statefulset/streamer
+sudo k0s kubectl -n rekognitor rollout restart statefulset/streamer
 ```
 
 **Ligar e desligar:**
@@ -314,6 +348,8 @@ kubectl -n rekognitor rollout restart statefulset/streamer
 ```
 
 São removidos os serviços, o k0s (`k0s reset`, se foi o instalador que o instalou), o contêiner `rekognitor-k0s` e o volume dele, a VM Colima e os pacotes Homebrew que o instalador adicionou, e a pasta `~/.rekognitor`. No Linux, o k0s recomenda reiniciar a máquina depois, para limpar regras de rede que restarem.
+
+![Desinstalação no Linux](img/linux-desinstalacao.png)
 
 Para remover **só o Rekognitor** e manter o Kubernetes:
 
@@ -355,19 +391,20 @@ Depois rode `./install.sh` de novo.
 | `portas já em uso` | Outro Kubernetes, Docker Desktop ou um Rekognitor antigo está usando as portas. Pare ou remova o outro serviço. No Windows, verifique outras distribuições WSL com Kubernetes (`wsl -l -v`). |
 | `virtualização desabilitada` (Windows) | Habilite Intel VT-x / AMD-V na BIOS/UEFI do computador. |
 | `systemd não está ativo` (Linux) | O k0s precisa do systemd. Em WSL próprio, adicione `[boot]` `systemd=true` em `/etc/wsl.conf`. |
-| `serviços não ficaram prontos em 1200s` | Normalmente é um download lento ou bloqueado das imagens. Rode o instalador de novo, que continua de onde parou, ou aumente com `--timeout 2400`. Veja o motivo com `kubectl -n rekognitor get pods` e `kubectl -n rekognitor describe pod <nome>`. |
+| `serviços não ficaram prontos em 1200s` | Normalmente é um download lento ou bloqueado das imagens. Rode o instalador de novo, que continua de onde parou, ou aumente com `--timeout 2400`. Veja o motivo com `sudo k0s kubectl -n rekognitor get pods` e `sudo k0s kubectl -n rekognitor describe pod <nome>`. |
 | Pod em `ImagePullBackOff` | Sem acesso ao Docker Hub, ou o limite de downloads foi atingido (use `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`). |
 | Pod em `Pending` | Faltam CPU ou memória. Use `--profile light` ou dê mais recursos ao Docker/Colima. |
 | Windows: `http://localhost:31881` não abre | Aguarde 1 minuto depois do login. Confira se a tarefa **Rekognitor** está "Em execução" no Agendador de Tarefas. Se não estiver, reinicie o Windows. |
 | Outras máquinas não acessam | Windows: reinstale com `-AllowLan`. Linux: libere as portas no firewall (seção 5.3). macOS: libere o acesso em *Ajustes → Rede → Firewall*. |
-| Esqueci as credenciais | Veja a [seção 7](#7-primeiro-acesso). |
+| `o streamer recusou as credenciais` | O CLIENT_ID ou o SECRET foi digitado errado. Rode de novo com `--update-credentials` (seção 7.1). |
+| Perdi as credenciais | Elas não ficam gravadas em arquivo. Peça à Rekognitor e troque com `--update-credentials`. |
+| `sem terminal para pedir as credenciais` | O instalador rodou sem terminal (automação). Defina `REKOGNITOR_CLIENT_ID` e `REKOGNITOR_SECRET`. |
 
 Para pedir suporte, envie a saída de:
 
 ```bash
-source ~/.rekognitor/env   # Windows: wsl -d Rekognitor
-kubectl -n rekognitor get pods -o wide
-kubectl -n rekognitor get events --sort-by=.lastTimestamp | tail -30
+sudo k0s kubectl -n rekognitor get pods -o wide
+sudo k0s kubectl -n rekognitor get events --sort-by=.lastTimestamp | tail -30
 ```
 
 ## 13. Onde ficam os arquivos
@@ -375,8 +412,8 @@ kubectl -n rekognitor get events --sort-by=.lastTimestamp | tail -30
 | | Linux / macOS | Windows |
 | --- | --- | --- |
 | Estado da instalação | `~/.rekognitor/state` | `C:\ProgramData\Rekognitor\state.json` |
-| Credenciais | `~/.rekognitor/secrets` | `C:\ProgramData\Rekognitor\credenciais.txt` |
-| kubeconfig do cluster | `~/.rekognitor/kubeconfig` | dentro da distribuição: `/root/.rekognitor/kubeconfig` |
+| Credenciais da API | Secret `rekognitor-credentials` no k0s (não ficam em arquivo) | Secret `rekognitor-credentials` no k0s, dentro da distribuição |
+| Acesso de administrador ao k0s | `sudo k0s kubectl` (macOS: `docker exec rekognitor-k0s k0s kubectl`) | `wsl -d Rekognitor k0s kubectl` |
 | Ferramentas baixadas | `~/.rekognitor/bin` | dentro da distribuição |
 | Configurações próprias | `~/.rekognitor/values/` | `/root/.rekognitor/values/` (na distribuição) |
 | Distribuição WSL | — | `C:\ProgramData\Rekognitor\wsl` |

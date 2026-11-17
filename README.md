@@ -12,9 +12,10 @@ Instaladores do **Rekognitor** para Windows, Linux e macOS. Cada um instala a so
 | **Linux** | `./install.sh` | `./uninstall.sh` |
 | **macOS** | `./install.sh` | `./uninstall.sh` |
 
-1. Baixe este repositório (**Code → Download ZIP**) e extraia numa pasta local.
-2. Rode o instalador do seu sistema.
-3. Abra **<http://localhost:31881>** e entre com o `CLIENT_ID` e o `SECRET` mostrados no final da instalação.
+1. Tenha em mãos o `CLIENT_ID` e o `SECRET` fornecidos pela Rekognitor.
+2. Baixe este repositório (**Code → Download ZIP**) e extraia numa pasta local.
+3. Rode o instalador do seu sistema e digite as credenciais quando ele pedir. O que você digita não aparece na tela.
+4. Abra **<http://localhost:31881>** e entre com as mesmas credenciais.
 
 Linux/macOS em uma linha:
 
@@ -40,7 +41,7 @@ Os instaladores podem ser rodados de novo: rodar outra vez atualiza o Rekognitor
 
 ## Para mantenedores
 
-- `charts/` é uma cópia dos Helm charts do repositório `rekognitor.helm`, que é privado. Os segredos são substituídos por placeholders, e o instalador gera segredos novos em cada instalação. Para atualizar a cópia:
+- `charts/` é uma cópia dos Helm charts do repositório `rekognitor.helm`, que é privado. Os segredos são substituídos por placeholders. O instalador pede o `CLIENT_ID` e o `SECRET` ao usuário, sem eco, e os grava no Secret `rekognitor-credentials` do k0s, de onde o streamer lê (`credentials.existingSecret`). Para atualizar a cópia:
 
   ```bash
   tools/sync-charts.sh /caminho/para/rekognitor.helm

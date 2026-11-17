@@ -14,7 +14,8 @@ set -euo pipefail
 
 REK_HOME=${REKOGNITOR_HOME:-$HOME/.rekognitor}
 STATE=$REK_HOME/state
-KCFG=$REK_HOME/kubeconfig
+CONTAINER=rekognitor-k0s
+API_PORT_DOCKER=16443
 NAMESPACE=rekognitor
 KEEP_CLUSTER=0 YES=0
 
@@ -60,7 +61,7 @@ export PATH=$REK_HOME/bin:$PATH
 printf '%sRekognitor — desinstalador%s\n\n' "$B" "$N"
 echo "Será removido:"
 info "• serviços do Rekognitor: ${CHARTS:-?} (namespace $NAMESPACE)"
-info "• os rostos cadastrados e as configurações salvas"
+info "• os rostos cadastrados, as configurações salvas e as credenciais da API (Secret)"
 if [[ $KEEP_CLUSTER == 0 ]]; then
   [[ $K0S_INSTALLED == 1 ]] && info "• o k0s (Kubernetes) instalado pelo Rekognitor"
   [[ -n $K0S_CONTAINER ]] && info "• o contêiner k0s '$K0S_CONTAINER' e o volume dele"
@@ -72,14 +73,29 @@ if [[ $YES == 0 ]]; then
   read -r -p "Confirmar a desinstalação? [s/N] " a || true
   [[ $a == s || $a == S || $a == y || $a == Y ]] || die "cancelado"
 fi
-[[ $KEEP_CLUSTER == 0 && $K0S_INSTALLED == 1 && -n $SUDO ]] && { sudo -v || die "sudo é necessário para remover o k0s"; }
+[[ $CLUSTER == k0s && -n $SUDO ]] && { sudo -v || die "sudo é necessário para acessar o k0s"; }
+
+# admin kubeconfig only in a private temp dir while this runs (as in install.sh)
+TMPD=$(mktemp -d)
+chmod 700 "$TMPD"
+trap 'rm -rf "$TMPD"' EXIT
+KCFG=$TMPD/kubeconfig
+case $CLUSTER in
+  k0s) [[ -x /usr/local/bin/k0s ]] && $SUDO /usr/local/bin/k0s kubeconfig admin >"$KCFG" 2>/dev/null || true ;;
+  k0s-docker)
+    if docker exec "$CONTAINER" k0s kubeconfig admin >"$KCFG" 2>/dev/null; then
+      sed "s#server: https://.*#server: https://127.0.0.1:$API_PORT_DOCKER#" "$KCFG" >"$KCFG.tmp" && mv "$KCFG.tmp" "$KCFG"
+    fi ;;
+  existing) kubectl config view --raw --minify >"$KCFG" 2>/dev/null || true ;;
+esac
 
 step "Removendo o Rekognitor"
-if [[ -f $KCFG ]] && KUBECONFIG=$KCFG kubectl get ns "$NAMESPACE" >/dev/null 2>&1; then
+if [[ -s $KCFG ]] && KUBECONFIG=$KCFG kubectl get ns "$NAMESPACE" >/dev/null 2>&1; then
   for chart in $CHARTS; do
     KUBECONFIG=$KCFG helm uninstall "$chart" -n "$NAMESPACE" >/dev/null 2>&1 && ok "$chart" || true
   done
-  # StatefulSet PVCs (vision's faces) outlive helm uninstall: the namespace takes them
+  # StatefulSet PVCs (vision's faces) and the rekognitor-credentials Secret outlive
+  # helm uninstall: deleting the namespace takes them
   KUBECONFIG=$KCFG kubectl delete namespace "$NAMESPACE" --timeout=180s >/dev/null 2>&1 || warn "o namespace $NAMESPACE demorou a ser removido"
   ok "namespace $NAMESPACE removido"
 else
@@ -87,7 +103,7 @@ else
 fi
 
 if [[ $KEEP_CLUSTER == 1 ]]; then
-  # keep state/kubeconfig so a later install.sh reuses the cluster
+  # keep the state so a later install.sh reuses the cluster
   sed -i.bak -e '/^CHARTS=/d' -e '/^PROFILE=/d' -e '/^INSTALLED_AT=/d' "$STATE" && rm -f "$STATE.bak"
   printf '\n%sRekognitor removido. O Kubernetes foi mantido.%s\n' "$G$B" "$N"
   exit 0

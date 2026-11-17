@@ -228,6 +228,13 @@ In-Distro "set -e; rm -rf /opt/rekognitor; mkdir -p /opt/rekognitor; tar -C '$ws
 if ($LASTEXITCODE -ne 0) { Fail "falha ao copiar $Root para a distribuição" }
 Ok "instalador em /opt/rekognitor"
 
+# install.sh asks for the CLIENT_ID / SECRET issued by Rekognitor itself, without
+# echo, in this same console: they never pass through PowerShell, a command line
+# or a file. For unattended installs, REKOGNITOR_CLIENT_ID / REKOGNITOR_SECRET set
+# in this session's environment are handed to WSL through WSLENV (not argv).
+if ($env:REKOGNITOR_CLIENT_ID -and $env:REKOGNITOR_SECRET) {
+    $env:WSLENV = (@($env:WSLENV, 'REKOGNITOR_CLIENT_ID', 'REKOGNITOR_SECRET') | Where-Object { $_ }) -join ':'
+}
 & wsl.exe -d $Distro -u root -- bash /opt/rekognitor/install.sh --yes --cluster k0s --profile $Sizing --timeout $Timeout
 if ($LASTEXITCODE -ne 0) { Fail "a instalação dentro do WSL falhou (veja as mensagens acima)" }
 
@@ -281,17 +288,9 @@ Write-Host ""
 Write-Host "  Interface web    $url   (atalho na Área de Trabalho)"
 if ($AllowLan) { Write-Host "                   na rede: http://${ip}:$UiPort" }
 Write-Host "  MQTT (câmeras)   ${ip}:31883   (WebSocket: ${ip}:31882)"
-$creds = In-Distro "cat /root/.rekognitor/secrets"
-$clientId = ($creds | Select-String '^CLIENT_ID=(.*)$').Matches.Groups[1].Value
-$secret = ($creds | Select-String '^SECRET=(.*)$').Matches.Groups[1].Value
-Set-Content -Path (Join-Path $Home_ 'credenciais.txt') -Value "CLIENT_ID=$clientId`r`nSECRET=$secret" -Encoding ASCII
-# ProgramData is readable by every user: only this user and the administrators
-& icacls.exe (Join-Path $Home_ 'credenciais.txt') /inheritance:r /grant:r "${env:USERNAME}:F" '*S-1-5-32-544:F' | Out-Null
-Write-Host ""
-Write-Host "  Login da interface (guarde em local seguro; cópia em $Home_\credenciais.txt)"
-Write-Host "    Identificação do cliente (CLIENT_ID)  $clientId" -ForegroundColor White
-Write-Host "    Chave de acesso (SECRET)              $secret" -ForegroundColor White
-Write-Host "  Comandos         wsl -d $Distro kubectl -n rekognitor get pods"
+Write-Host "  Login            CLIENT_ID e SECRET fornecidos pela Rekognitor"
+Write-Host "                   (guardados no Secret rekognitor-credentials do k0s)"
+Write-Host "  Comandos         wsl -d $Distro k0s kubectl -n rekognitor get pods"
 Write-Host "  Desinstalar      uninstall-windows.cmd"
 Write-Host ""
 if ($up) { Start-Process $url }

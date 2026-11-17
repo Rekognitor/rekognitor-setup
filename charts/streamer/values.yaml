@@ -9,6 +9,12 @@ service:
   port: 8085
   targetPort: 8085
   nodePort: 31881
+# Name of an existing Secret with keys CLIENT_ID and SECRET (the API credentials
+# Rekognitor issues to each customer). When set, env.CLIENT_ID / env.SECRET below
+# are ignored and the streamer reads them from the Secret. rekognitor-setup's
+# installer creates it as "rekognitor-credentials".
+credentials:
+  existingSecret: ""
 env:
   CLIENT_ID: "set-by-installer"
   SECRET: "set-by-installer"
@@ -48,11 +54,10 @@ env:
   # are the code defaults). GET /rtsp/config exposes them; PUT overrides live.
   DEFAULT_THRESHOLD: "0.5"
   DEFAULT_DELAY: "1"
-  # Detect model new cameras use. rekognitor-detect serves "rtdet" (RT-DETRv2-S,
-  # COCO, the default) and "dlib" (legacy coco50 YOLO); any other name is rejected.
+  # Detect model new cameras use: "rtdet" (RT-DETRv2-S).
   DEFAULT_MODEL_FILTER: "rtdet"
-  # Models the UI offers (Settings + new-camera form), in this order.
-  MODEL_CATALOG: "rtdet,dlib"
+  # Models the UI offers (Settings + new-camera form).
+  MODEL_CATALOG: "rtdet"
   DEFAULT_CLASS_FILTER: "0"
   # --- Face recognition (facematch capability) -----------------------------
   # gRPC address of the rekognitor-vision service (helm-charts/vision). Enables

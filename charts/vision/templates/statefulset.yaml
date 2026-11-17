@@ -38,7 +38,7 @@ spec:
           volumeMounts:
             - name: faces
               mountPath: {{ .Values.persistence.mountPath }}
-          # grpc.health.v1 is served by the app; loading the dlib models takes a few
+          # grpc.health.v1 is served by the app; loading the face models takes a few
           # seconds, so readiness gates traffic until it reports SERVING.
           startupProbe:
             grpc:

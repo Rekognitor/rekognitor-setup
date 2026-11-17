@@ -58,7 +58,7 @@ jobs:
   linux:
     name: linux (${{ matrix.cluster }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +67,13 @@ jobs:
       CLUSTER: ${{ matrix.cluster }}
     steps:
       - uses: actions/checkout@v4
+      - name: test credentials (random, masked in the logs)
+        run: |
+          id=ci-$(uuidgen); key=$(openssl rand -hex 48 | tr a-f A-F)
+          id2=ci-$(uuidgen); key2=$(openssl rand -hex 48 | tr a-f A-F)
+          for v in "$id" "$key" "$id2" "$key2"; do echo "::add-mask::$v"; done
+          { echo "REKOGNITOR_CLIENT_ID=$id"; echo "REKOGNITOR_SECRET=$key"
+            echo "NEW_CLIENT_ID=$id2"; echo "NEW_SECRET=$key2"; } >>"$GITHUB_ENV"
       - name: install.sh --check
         run: ./install.sh --check --cluster "$CLUSTER" 2>&1 | tee check.log
       - name: install.sh
@@ -74,20 +81,37 @@ jobs:
       - name: verify
         run: |
           set -euo pipefail
-          source ~/.rekognitor/env
-          kubectl -n rekognitor get pods -o wide
-          test "$(kubectl -n rekognitor get pods --no-headers | grep -vc ' Running ')" -eq 0
+          if [[ $CLUSTER == k0s ]]; then kc() { sudo k0s kubectl "$@"; }; else kc() { docker exec rekognitor-k0s k0s kubectl "$@"; }; fi
+          login() { printf '{"clientId":"%s","secret":"%s"}' "$1" "$2" | curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:31881/auth/login; }
+          kc -n rekognitor get pods -o wide
+          test "$(kc -n rekognitor get pods --no-headers | grep -vc ' Running ')" -eq 0
           curl -fsS http://127.0.0.1:31881/healthz
           curl -fsS http://127.0.0.1:31881/rtsp/health
           timeout 5 bash -c '</dev/tcp/127.0.0.1/31883'   # MQTT NodePort
-          kubectl -n rekognitor get svc streamer mqtt -o jsonpath='{range .items[*]}{.metadata.name} {.spec.type}{"\n"}{end}' >svc.txt
+          kc -n rekognitor get svc streamer mqtt -o jsonpath='{range .items[*]}{.metadata.name} {.spec.type}{"\n"}{end}' >svc.txt
           cat svc.txt
           ! grep -q LoadBalancer svc.txt
-          kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' | grep -q k0s
-          test "$(stat -c %a ~/.rekognitor/secrets)" = 600
-          ! kubectl -n rekognitor get statefulset streamer -o yaml | grep -q set-by-installer
-      - name: install.sh again (upgrade)
-        run: ./install.sh --yes --cluster "$CLUSTER" 2>&1 | tee upgrade.log
+          kc get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' | grep -q k0s
+          # credentials: in the Secret, nowhere else
+          test "$(kc -n rekognitor get secret rekognitor-credentials -o jsonpath='{.data.SECRET}' | base64 -d)" = "$REKOGNITOR_SECRET"
+          ! kc -n rekognitor get statefulset streamer -o yaml | grep -qF "$REKOGNITOR_SECRET"
+          ! kc -n rekognitor get statefulset streamer -o yaml | grep -qF "$REKOGNITOR_CLIENT_ID"
+          kc -n rekognitor get statefulset streamer -o yaml | grep -q 'name: rekognitor-credentials'
+          ! grep -rqF "$REKOGNITOR_SECRET" ~/.rekognitor install.log
+          test ! -e ~/.rekognitor/kubeconfig && test ! -e ~/.rekognitor/secrets
+          # admin access is not left to the user without sudo/docker
+          ! ls ~/.rekognitor | grep -qi kubeconfig
+          test "$(login "$REKOGNITOR_CLIENT_ID" "$REKOGNITOR_SECRET")" = 200
+          test "$(login "$REKOGNITOR_CLIENT_ID" WRONG)" = 401
+      - name: install.sh again (upgrade, no credentials given -> keeps the Secret)
+        run: env -u REKOGNITOR_CLIENT_ID -u REKOGNITOR_SECRET ./install.sh --yes --cluster "$CLUSTER" 2>&1 | tee upgrade.log
+      - name: install.sh --update-credentials
+        run: |
+          set -euo pipefail
+          REKOGNITOR_CLIENT_ID=$NEW_CLIENT_ID REKOGNITOR_SECRET=$NEW_SECRET ./install.sh --yes --cluster "$CLUSTER" --update-credentials 2>&1 | tee update-credentials.log
+          login() { printf '{"clientId":"%s","secret":"%s"}' "$1" "$2" | curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:31881/auth/login; }
+          test "$(login "$NEW_CLIENT_ID" "$NEW_SECRET")" = 200
+          test "$(login "$REKOGNITOR_CLIENT_ID" "$REKOGNITOR_SECRET")" = 401
       - name: uninstall.sh
         run: ./uninstall.sh --yes 2>&1 | tee uninstall.log
       - name: verify removal
@@ -105,11 +129,11 @@ jobs:
         if: failure()
         run: |
           set +e
-          export KUBECONFIG=~/.rekognitor/kubeconfig
-          kubectl get all,pvc,networkpolicy -A -o wide
-          kubectl get events -A --sort-by=.lastTimestamp | tail -60
-          for p in $(kubectl -n rekognitor get pods -o name); do
-            kubectl -n rekognitor describe "$p"; kubectl -n rekognitor logs "$p" --all-containers --tail=100
+          if [[ $CLUSTER == k0s ]]; then kc() { sudo k0s kubectl "$@"; }; else kc() { docker exec rekognitor-k0s k0s kubectl "$@"; }; fi
+          kc get all,pvc,networkpolicy -A -o wide
+          kc get events -A --sort-by=.lastTimestamp | tail -60
+          for p in $(kc -n rekognitor get pods -o name); do
+            kc -n rekognitor describe "$p"; kc -n rekognitor logs "$p" --all-containers --tail=100
           done
           sudo journalctl -u k0scontroller --no-pager | tail -80
           docker logs rekognitor-k0s 2>&1 | tail -80

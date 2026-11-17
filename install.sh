@@ -12,10 +12,17 @@
 # Idempotent: run it again to upgrade, or to start the cluster again (macOS)
 # after a reboot.
 #
+# API credentials: the CLIENT_ID and SECRET Rekognitor issues to the customer are
+# asked for without echo (or read from REKOGNITOR_CLIENT_ID / REKOGNITOR_SECRET),
+# never printed, never on a command line, never in a local file: they go
+# straight into the Kubernetes Secret "rekognitor-credentials", which the
+# streamer reads with secretKeyRef. Cluster admin access stays behind sudo (k0s)
+# or Docker (k0s-docker): the admin kubeconfig only exists in a private temp
+# directory while this script runs. Use `sudo k0s kubectl` afterwards.
+#
 # Everything it creates is recorded in ~/.rekognitor/state so uninstall.sh
 # removes exactly that and nothing it found already installed. Your
-# ~/.kube/config is never touched: the cluster's kubeconfig is
-# ~/.rekognitor/kubeconfig (`source ~/.rekognitor/env` to use kubectl).
+# ~/.kube/config is never touched.
 #
 # Also works piped (`curl -fsSL .../install.sh | bash`): it then downloads this
 # repository to ~/.rekognitor/src and runs from there.
@@ -37,8 +44,7 @@ if [[ ! -d $ROOT/charts ]]; then
 fi
 BIN=$REK_HOME/bin
 STATE=$REK_HOME/state
-SECRETS=$REK_HOME/secrets
-KCFG=$REK_HOME/kubeconfig
+CRED_SECRET=rekognitor-credentials # Secret with CLIENT_ID and SECRET (streamer)
 NAMESPACE=rekognitor # the streamer's DETECT_SERVICES_URL hardcodes detect.rekognitor.svc
 CHARTS=${CHARTS:-"redis mqtt detect vision streamer"}
 CLUSTER_NAME=rekognitor
@@ -57,7 +63,8 @@ COLIMA_CPU=${COLIMA_CPU:-4}
 COLIMA_MEMORY=${COLIMA_MEMORY:-8}
 COLIMA_DISK=${COLIMA_DISK:-40}
 
-PROFILE=auto CLUSTER=auto YES=0 CHECK_ONLY=0 TIMEOUT=1200
+PROFILE=auto CLUSTER=auto YES=0 CHECK_ONLY=0 TIMEOUT=1200 UPDATE_CREDS=0
+CRED_ID="" CRED_KEY="" CREDS_REPLACED=0
 
 # ---------------------------------------------------------------- output ----
 if [[ -t 1 ]]; then B=$'\e[1m' G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' C=$'\e[36m' N=$'\e[0m'; else B="" G="" Y="" R="" C="" N=""; fi
@@ -81,6 +88,7 @@ Uso: $0 [opções]
                               k0s-docker: k0s no contêiner oficial (Docker)
                               existing: usa o cluster do KUBECONFIG atual
   --timeout SEGUNDOS          espera máxima pelos pods (padrão: $TIMEOUT)
+  --update-credentials        pede de novo o CLIENT_ID e o SECRET (troca as credenciais)
   --check                     só verifica os pré-requisitos, não instala nada
   -y, --yes                   não pede confirmação
   -h, --help                  esta ajuda
@@ -93,6 +101,7 @@ while (($#)); do
     --cluster) CLUSTER=${2:?}; shift ;;
     --timeout) TIMEOUT=${2:?}; shift ;;
     --check) CHECK_ONLY=1 ;;
+    --update-credentials) UPDATE_CREDS=1 ;;
     -y | --yes) YES=1 ;;
     -h | --help) usage; exit 0 ;;
     *) usage; die "opção desconhecida: $1" ;;
@@ -343,6 +352,7 @@ cluster_k0s_docker() {
     docker start "$CONTAINER" >/dev/null
   else
     info "baixando $K0S_IMAGE e criando o contêiner $CONTAINER..."
+    docker pull -q "$K0S_IMAGE" >/dev/null || die "falha ao baixar $K0S_IMAGE"
     # the official way to run k0s in Docker (docs.k0sproject.io: "Run k0s in Docker"),
     # controller + worker in one container; NodePorts published on the host.
     docker run -d --name "$CONTAINER" --hostname "$CLUSTER_NAME" --restart unless-stopped \
@@ -379,27 +389,66 @@ pick_profile() {
   info "perfil automático: $PROFILE ($cpu CPUs no cluster)"
 }
 
-# Per-installation secrets, generated once and reused on upgrades. The charts in
-# this public repository only carry placeholders.
 rand_hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
-ensure_secrets() {
-  if [[ ! -f $SECRETS ]]; then
-    local u
-    u=$(rand_hex 16)
-    (
-      umask 077
-      {
-        echo "# Gerado pelo instalador em $(date '+%Y-%m-%d %H:%M:%S'). Credenciais da API do streamer"
-        echo "# (login da interface quando REQUIRE_AUTH=1) e chave das sessões do dashboard MQTT."
-        echo "CLIENT_ID=${u:0:8}-${u:8:4}-${u:12:4}-${u:16:4}-${u:20:12}"
-        echo "SECRET=$(rand_hex 64 | tr a-f A-F)"
-        echo "MQTT_AUTH_SECRET=$(rand_hex 32)"
-      } >"$SECRETS"
-    )
+b64() { base64 | tr -d '\n'; }
+valid_cred() { [[ -n $1 && ${#1} -le 512 && $1 =~ ^[A-Za-z0-9._~+/=-]+$ ]]; }
+
+# Reads the API credentials Rekognitor issued into CRED_ID / CRED_KEY (memory
+# only): from REKOGNITOR_CLIENT_ID / REKOGNITOR_SECRET, or typed without echo.
+collect_credentials() {
+  if [[ -n ${REKOGNITOR_CLIENT_ID:-} || -n ${REKOGNITOR_SECRET:-} ]]; then
+    CRED_ID=${REKOGNITOR_CLIENT_ID:-} CRED_KEY=${REKOGNITOR_SECRET:-}
+    if ! valid_cred "$CRED_ID" || ! valid_cred "$CRED_KEY"; then
+      die "REKOGNITOR_CLIENT_ID / REKOGNITOR_SECRET vazios ou com caracteres inválidos"
+    fi
+    ok "credenciais da API lidas de REKOGNITOR_CLIENT_ID / REKOGNITOR_SECRET"
+    return
   fi
-  CLIENT_ID=$(sed -n 's/^CLIENT_ID=//p' "$SECRETS")
-  API_SECRET=$(sed -n 's/^SECRET=//p' "$SECRETS")
-  MQTT_AUTH_SECRET=$(sed -n 's/^MQTT_AUTH_SECRET=//p' "$SECRETS")
+  [[ -t 0 ]] || die "sem terminal para pedir as credenciais: defina REKOGNITOR_CLIENT_ID e REKOGNITOR_SECRET"
+  step "Credenciais da API Rekognitor"
+  info "Digite o CLIENT_ID e o SECRET fornecidos pela Rekognitor."
+  info "O que você digitar não aparece na tela; cada um é pedido duas vezes."
+  local again _try
+  for _try in 1 2 3; do
+    read -r -s -p "    Identificação do cliente (CLIENT_ID): " CRED_ID; echo
+    read -r -s -p "    Repita o CLIENT_ID:                   " again; echo
+    read -r -s -p "    Chave de acesso (SECRET):             " CRED_KEY; echo
+    if [[ $CRED_ID != "$again" ]]; then warn "os dois CLIENT_ID digitados não conferem"; continue; fi
+    read -r -s -p "    Repita o SECRET:                      " again; echo
+    if [[ $CRED_KEY != "$again" ]]; then warn "os dois SECRET digitados não conferem"; continue; fi
+    if ! valid_cred "$CRED_ID" || ! valid_cred "$CRED_KEY"; then warn "credenciais vazias ou com caracteres inválidos"; continue; fi
+    again=""
+    ok "credenciais recebidas (não são exibidas nem gravadas em arquivo)"
+    return
+  done
+  CRED_ID="" CRED_KEY=""
+  die "credenciais não informadas"
+}
+
+# Stores the credentials in the Secret (only cluster admins can read it: sudo
+# k0s / Docker access). The manifest goes through stdin, never argv.
+ensure_credentials() {
+  local exists=0
+  k get secret "$CRED_SECRET" >/dev/null 2>&1 && exists=1
+  if [[ -z $CRED_ID ]]; then
+    if [[ $exists == 1 ]]; then ok "credenciais da API: já configuradas (Secret $CRED_SECRET)"; return; fi
+    collect_credentials
+  fi
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: %s\n  namespace: %s\n  labels:\n    app.kubernetes.io/part-of: rekognitor\ntype: Opaque\ndata:\n  CLIENT_ID: %s\n  SECRET: %s\n' \
+    "$CRED_SECRET" "$NAMESPACE" "$(printf %s "$CRED_ID" | b64)" "$(printf %s "$CRED_KEY" | b64)" | kc apply -f - >/dev/null ||
+    die "falha ao gravar o Secret $CRED_SECRET"
+  CRED_ID="" CRED_KEY=""
+  [[ $exists == 1 ]] && CREDS_REPLACED=1
+  ok "credenciais da API gravadas no Secret $CRED_SECRET (namespace $NAMESPACE)"
+}
+
+# The mqtt dashboard's session-signing key: internal, generated once and kept in
+# the chart's own Secret; handed to helm through a private values file.
+mqtt_values() {
+  local key
+  key=$(k get secret mqtt-dashboard -o jsonpath='{.data.auth-secret}' 2>/dev/null | base64 --decode 2>/dev/null || true)
+  [[ -n $key ]] || key=$(rand_hex 32)
+  printf 'dashboard:\n  authSecret: "%s"\n' "$key" >"$TMPD/mqtt-secret.yaml"
 }
 
 pods_table() { k get pods -o wide 2>/dev/null | awk '{printf "    %-28s %-7s %-22s %s\n", $1, $2, $3, $4}'; }
@@ -415,7 +464,8 @@ deploy() {
     k patch sa default -p '{"imagePullSecrets":[{"name":"dockerhub"}]}' >/dev/null
     ok "pulls autenticados no Docker Hub"
   fi
-  ensure_secrets
+  ensure_credentials
+  mqtt_values
   local chart args
   for chart in $CHARTS; do
     [[ -d $ROOT/charts/$chart ]] || die "chart $chart não encontrado em $ROOT/charts"
@@ -424,8 +474,8 @@ deploy() {
     [[ -f $ROOT/values/common/$chart.yaml ]] && args="-f $ROOT/values/common/$chart.yaml"
     [[ -f $ROOT/values/$PROFILE/$chart.yaml ]] && args="$args -f $ROOT/values/$PROFILE/$chart.yaml"
     case $chart in
-      streamer) args="$args --set-string env.CLIENT_ID=$CLIENT_ID,env.SECRET=$API_SECRET" ;;
-      mqtt) args="$args --set-string dashboard.authSecret=$MQTT_AUTH_SECRET" ;;
+      streamer) args="$args --set credentials.existingSecret=$CRED_SECRET" ;;
+      mqtt) args="$args -f $TMPD/mqtt-secret.yaml" ;;
     esac
     # the customer's own overrides, kept across upgrades: ~/.rekognitor/values/<chart>.yaml
     [[ -f $REK_HOME/values/$chart.yaml ]] && args="$args -f $REK_HOME/values/$chart.yaml"
@@ -436,6 +486,8 @@ deploy() {
   done
   state_set CHARTS "$CHARTS"
   state_set PROFILE "$PROFILE"
+  # env from a Secret is read at container start
+  [[ $CREDS_REPLACED == 1 ]] && k rollout restart statefulset/streamer >/dev/null
 
   step "Aguardando os serviços (o 1º download das imagens pode levar alguns minutos)"
   local deadline=$((SECONDS + TIMEOUT)) pending w last=""
@@ -447,7 +499,7 @@ deploy() {
     [[ -z $pending ]] && break
     if ((SECONDS >= deadline)); then
       pods_table
-      die "serviços não ficaram prontos em ${TIMEOUT}s:$pending. Veja: KUBECONFIG=$KCFG kubectl -n $NAMESPACE describe pods"
+      die "serviços não ficaram prontos em ${TIMEOUT}s:$pending. Veja: $(kubectl_hint) -n $NAMESPACE describe pods"
     fi
     if [[ $pending != "$last" ]]; then info "aguardando:$pending"; last=$pending; fi
     sleep 5
@@ -463,7 +515,6 @@ health() {
     # the cluster's NodePorts are not on this machine: go through a port-forward
     k port-forward svc/streamer 18085:8085 >/dev/null 2>&1 &
     PF_PID=$!
-    trap 'kill $PF_PID 2>/dev/null || true' EXIT
     url=http://127.0.0.1:18085
   fi
   for _ in $(seq 60); do curl -fsS -m 5 -o /dev/null "$url/healthz" 2>/dev/null && break; sleep 3; done
@@ -477,16 +528,28 @@ health() {
   done
   if echo "$h" | grep -q '"detect":{[^}]*"ok":true'; then ok "detecção (detect) conectada"; else warn "detect ainda não respondeu: $h"; fi
   if echo "$h" | grep -q '"vision":{[^}]*"ok":true'; then ok "reconhecimento facial (vision) conectado"; fi
+  # the streamer must accept the credentials it got from the Secret; the JSON body
+  # goes through stdin and the values are read straight from the Secret
+  local code id key
+  id=$(k get secret "$CRED_SECRET" -o jsonpath='{.data.CLIENT_ID}' | base64 --decode)
+  key=$(k get secret "$CRED_SECRET" -o jsonpath='{.data.SECRET}' | base64 --decode)
+  code=$(printf '{"clientId":"%s","secret":"%s"}' "$id" "$key" |
+    curl -s -m 10 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- "$url/auth/login" || true)
+  id="" key=""
+  if [[ $code == 200 ]]; then ok "login com as credenciais da API aceito"; else warn "o streamer recusou as credenciais (HTTP $code): confira-as com --update-credentials"; fi
+}
+
+kubectl_hint() {
+  case $CLUSTER in
+    k0s) echo "${SUDO:+sudo }k0s kubectl" ;;
+    k0s-docker) echo "docker exec $CONTAINER k0s kubectl" ;;
+    existing) echo "kubectl" ;;
+  esac
 }
 
 summary() {
   local ip
   ip=$(lan_ip)
-  cat >"$REK_HOME/env" <<EOF
-# source ~/.rekognitor/env  ->  kubectl/helm apontando para o cluster do Rekognitor
-export KUBECONFIG="$KCFG"
-export PATH="$BIN:\$PATH"
-EOF
   state_set INSTALLED_AT "$(date '+%Y-%m-%d %H:%M:%S')"
   printf '\n%s╔══════════════════════════════════════════════════════════╗%s\n' "$G$B" "$N"
   printf '%s║            Rekognitor instalado com sucesso!             ║%s\n' "$G$B" "$N"
@@ -497,12 +560,11 @@ EOF
   MQTT (câmeras)   $ip:$MQTT_PORT   (WebSocket: $ip:31882)
   Perfil           $PROFILE
 
-  Login da interface (guarde em local seguro; ficam em $SECRETS)
-    Identificação do cliente (CLIENT_ID)  $CLIENT_ID
-    Chave de acesso (SECRET)              $API_SECRET
+  Login            CLIENT_ID e SECRET fornecidos pela Rekognitor
+                   (guardados no Secret $CRED_SECRET; trocar: install.sh --update-credentials)
 
   Comandos úteis
-    source ~/.rekognitor/env && kubectl -n $NAMESPACE get pods
+    $(kubectl_hint) -n $NAMESPACE get pods
     $ROOT/install.sh      atualizar / reiniciar
     $ROOT/uninstall.sh    desinstalar
 EOF
@@ -516,6 +578,19 @@ EOF
 printf '%sRekognitor — instalador%s  (%s, cluster: %s)\n' "$B" "$N" "$OS" "$CLUSTER"
 mkdir -p "$BIN"
 export PATH=$BIN:$PATH
+# private scratch: the admin kubeconfig and the mqtt values live here only while
+# the script runs (0700, removed on exit)
+TMPD=$(mktemp -d)
+chmod 700 "$TMPD"
+KCFG=$TMPD/kubeconfig
+PF_PID=""
+cleanup() {
+  [[ -n $PF_PID ]] && kill "$PF_PID" 2>/dev/null
+  rm -rf "$TMPD"
+}
+trap cleanup EXIT
+# files earlier versions of this installer left behind
+rm -f "$REK_HOME/kubeconfig" "$REK_HOME/env" "$REK_HOME/secrets"
 
 if ! preflight; then
   [[ $CHECK_ONLY == 1 ]] && die "pré-requisitos não atendidos (veja os itens com !)"
@@ -532,6 +607,9 @@ if [[ -z $PREV_CLUSTER ]]; then
   info "$CHARTS no namespace '$NAMESPACE'."
   confirm "Continuar?" || die "cancelado"
 fi
+# asked up front on a fresh install (or to replace them), so nobody waits for the
+# image downloads to be prompted; on upgrades the existing Secret is kept
+if [[ -z $PREV_CLUSTER || $UPDATE_CREDS == 1 || -n ${REKOGNITOR_CLIENT_ID:-} ]]; then collect_credentials; fi
 [[ $CLUSTER == k0s && -n $SUDO ]] && { sudo -v || die "sudo é necessário para instalar o k0s"; }
 
 state_set CLUSTER "$CLUSTER"

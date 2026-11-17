@@ -14,9 +14,9 @@ service:
 env:
   FACE_MATCH_DISTANCE: "0.6"
   FACE_MATCH_MARGIN: "0.03"
-  # simultaneous dlib calls; dlib is CPU-bound, keep <= the CPU limit below
+  # simultaneous face inferences; CPU-bound, keep <= the CPU limit below
   FACE_MAX_CONCURRENCY: "2"
-  # "1" = dlib CNN detector (more accurate, much slower on CPU) instead of HOG
+  # "1" = CNN face detector (more accurate, much slower on CPU) instead of HOG
   FACE_USE_CNN: "0"
 # Enrolled faces (zvec index + metadata + thumbnails) - mounted at FACES_DB_DIR.
 persistence:

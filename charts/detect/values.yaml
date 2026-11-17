@@ -15,9 +15,8 @@ service:
   # GRPC_RENEW_CONN_TICKER, which needs the pod IPs, not a single virtual IP.
   # No authentication: never expose it outside the cluster.
   port: 50051
-# The image bundles two models, both loaded at startup and chosen per request by the
-# streamer's modelFilter: "rtdet" = RT-DETRv2-S (/app/models/rtdetrv2-s.onnx, the
-# streamer's default) and "dlib" (or empty) = legacy coco50 YOLO.
+# Model: "rtdet" = RT-DETRv2-S (/app/models/rtdetrv2-s.onnx), loaded at startup and
+# selected by the streamer's modelFilter.
 env:
   # ONNX Runtime intra-op threads per inference; keep <= the CPU limit below.
   ONNX_THREADS: "2"

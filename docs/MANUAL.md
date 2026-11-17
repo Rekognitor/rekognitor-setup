@@ -2,7 +2,7 @@
 
 Este manual mostra como instalar, atualizar e desinstalar o Rekognitor em **Windows**, **Linux** e **macOS**, usando os instaladores deste repositório.
 
-> **Sobre as imagens:** todas as imagens deste manual são saídas reais dos instaladores e da interface do Rekognitor. As instalações completas foram feitas num Ubuntu 24.04 com 4 CPUs (máquina de testes do CI), com credenciais de teste. As telas do próprio Windows (UAC, SmartScreen) são descritas em texto.
+> **Sobre as imagens:** todas as imagens deste manual são saídas reais dos instaladores e da interface do Rekognitor. As instalações completas foram feitas num Ubuntu 24.04 com 4 CPUs (máquina de testes do CI), com credenciais de teste passadas por variáveis de ambiente. As telas do próprio Windows (UAC, SmartScreen) são descritas em texto.
 
 ## Sumário
 
@@ -189,7 +189,7 @@ cd rekognitor-setup
    - testa a interface, a conexão com o detect e o vision e o login com as credenciais.
 4. No final, aparece o resumo com o endereço da interface. As credenciais não são exibidas.
 
-Uma instalação completa, do início:
+Uma instalação completa, do início. Nela, as credenciais vieram das variáveis de ambiente (instalação automatizada); numa instalação interativa, no lugar dessa linha aparece o pedido mostrado na [seção 7.1](#71-credenciais-da-api):
 
 ![Instalação no Linux: pré-requisitos, ferramentas e k0s](img/linux-instalacao-1.png)
 
@@ -267,7 +267,7 @@ O **CLIENT_ID** e o **SECRET** são emitidos pela Rekognitor para cada cliente. 
 - **Só administradores do k0s leem:** no Linux, quem tem `sudo`. No Windows, o seu usuário, que é o dono da distribuição `Rekognitor`. No macOS, quem tem acesso ao Docker.
 - **Login conferido:** no fim da instalação, o instalador confere se o streamer aceita as credenciais.
 
-**Trocar as credenciais** (por exemplo, quando a Rekognitor emitir novas): rode o instalador com a opção abaixo. Ele pede os novos valores, atualiza o Secret e reinicia o streamer.
+**Trocar as credenciais** (por exemplo, quando a Rekognitor emitir novas): rode o instalador com a opção abaixo. Ele pede os novos valores, atualiza o Secret, reinicia o streamer e confere o login.
 
 ```bash
 ./install.sh --update-credentials                 # Linux / macOS
@@ -276,6 +276,8 @@ O **CLIENT_ID** e o **SECRET** são emitidos pela Rekognitor para cada cliente. 
 ```bat
 wsl -d Rekognitor bash /opt/rekognitor/install.sh --update-credentials
 ```
+
+![Troca de credenciais](img/linux-troca-credenciais.png)
 
 **Instalação automatizada** (sem ninguém digitando): defina as variáveis de ambiente `REKOGNITOR_CLIENT_ID` e `REKOGNITOR_SECRET` antes de rodar o instalador. No Windows, defina as variáveis na mesma janela antes de rodar o `install-windows.cmd`. Elas são repassadas ao WSL pelo ambiente, e não pela linha de comando.
 
@@ -307,7 +309,7 @@ wsl -d Rekognitor bash /opt/rekognitor/install.sh --update-credentials
 1. Baixe o repositório de novo (ZIP ou `git pull`).
 2. Rode o instalador de novo: `./install.sh` ou `install-windows.cmd`.
 
-A atualização mantém as credenciais (não são pedidas de novo), os rostos cadastrados e as configurações. As imagens dos serviços usam a tag `latest`, então cada reinstalação baixa a versão mais recente. O k0s já instalado é reaproveitado:
+A atualização mantém as credenciais (não são pedidas de novo), os rostos cadastrados e as configurações. As imagens dos serviços usam a tag `latest`, então cada reinstalação baixa a versão mais recente. O k0s já instalado e as credenciais já gravadas são reaproveitados:
 
 ![Atualização: o k0s é reaproveitado](img/linux-atualizacao.png)
 

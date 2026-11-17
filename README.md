@@ -2,7 +2,7 @@
 
 Instaladores do **Rekognitor** para Windows, Linux e macOS. Cada um instala a solução completa numa única máquina: Kubernetes (k3s) + streamer, detect, vision, mqtt e redis.
 
-📖 **[Manual de instalação completo](docs/MANUAL.md)**
+📖 **[Manual de instalação completo](docs/MANUAL.md)** · 📄 **[versão em PDF](docs/MANUAL.pdf)**
 
 ## Instalação rápida
 
@@ -43,5 +43,5 @@ Os instaladores podem ser rodados de novo: rodar outra vez atualiza o Rekognitor
   ```
 
 - `values/light/` define o perfil para máquinas com menos de 6 CPUs.
-- As imagens do manual são saídas reais, renderizadas com `tools/screenshots.sh` (precisa de podman ou docker).
+- As imagens do manual são saídas reais, renderizadas com `tools/screenshots.sh`. Depois de editar o manual, regenere o PDF com `tools/build-manual-pdf.sh`. Os dois precisam de podman ou docker.
 - O CI (`.github/workflows/installer.yml`) roda os lints, a instalação → atualização → desinstalação completa num Ubuntu, e verificações de sintaxe no macOS (bash 3.2) e no Windows.

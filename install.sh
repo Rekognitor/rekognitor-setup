@@ -22,7 +22,7 @@ set -euo pipefail
 
 REPO_TARBALL=${REPO_TARBALL:-https://github.com/Rekognitor/rekognitor-setup/archive/refs/heads/main.tar.gz}
 REK_HOME=${REKOGNITOR_HOME:-$HOME/.rekognitor}
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)
+if ! ROOT=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd); then ROOT=""; fi
 if [[ ! -d $ROOT/charts ]]; then
   # piped through bash: fetch the whole repository (charts, values) and re-run from it
   echo "Baixando o instalador do Rekognitor..."
@@ -96,10 +96,10 @@ case $PROFILE in auto | light | full) ;; *) die "--profile deve ser auto, light 
 case $CLUSTER in auto | k3s | k3d | existing) ;; *) die "--cluster deve ser auto, k3s, k3d ou existing" ;; esac
 
 # ----------------------------------------------------------------- state ----
-state_get() { [[ -f $STATE ]] && sed -n "s/^$1=//p" "$STATE" | tail -1 || true; }
+state_get() { if [[ -f $STATE ]]; then sed -n "s/^$1=//p" "$STATE" | tail -1; fi; }
 state_set() {
   mkdir -p "$REK_HOME"
-  { [[ -f $STATE ]] && grep -v "^$1=" "$STATE" || true; } >"$STATE.tmp"
+  if [[ -f $STATE ]]; then grep -v "^$1=" "$STATE" >"$STATE.tmp" || true; else : >"$STATE.tmp"; fi
   echo "$1=$2" >>"$STATE.tmp"
   mv "$STATE.tmp" "$STATE"
 }

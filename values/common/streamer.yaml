@@ -1,0 +1,4 @@
+# Todos os perfis: k0s não tem LoadBalancer, então a interface/API é exposta só
+# por NodePort (31881), igual em Linux, Windows (WSL) e macOS.
+service:
+  type: NodePort

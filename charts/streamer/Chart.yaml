@@ -1,0 +1,4 @@
+apiVersion: v2
+name: streamer
+description: A Helm chart for the streamer service
+version: 0.1.0

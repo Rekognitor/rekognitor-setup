@@ -1,0 +1,13 @@
+# Perfil "light" (máquinas com menos de 6 CPUs): uma réplica do detect, sem
+# autoscaling e requests pequenos, para tudo caber num único nó modesto. Os limits
+# ficam iguais aos de produção.
+replicaCount: 1
+hpa:
+  enabled: false
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "1Gi"
+    cpu: "2000m"

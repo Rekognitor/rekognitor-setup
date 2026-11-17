@@ -1,0 +1,169 @@
+name: installer
+
+# lint     - shellcheck, PowerShell parse/analyzer, helm lint + template (both profiles),
+#            and no secret from the private chart repo leaked into charts/
+# linux    - the real thing on Ubuntu, for both k0s modes:
+#              k0s         native k0s (Linux, and what Windows runs inside WSL)
+#              k0s-docker  k0s in the official container (what macOS runs)
+#            install.sh (k0s + charts, pods Ready, UI and MQTT NodePorts up),
+#            install.sh again (upgrade path), uninstall.sh (k0s and ~/.rekognitor
+#            gone). The logs are uploaded as artifacts (linux-logs-<cluster>).
+# macos    - install.sh/uninstall.sh parse and run --help under macOS' bash 3.2
+#            (hosted macOS runners cannot run Docker: k0s-docker is covered above)
+# windows  - PSScriptAnalyzer on the .ps1 files (hosted runners have no WSL2)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.21.4
+      - name: shellcheck
+        run: shellcheck -x install.sh uninstall.sh tools/sync-charts.sh
+      - name: helm lint + template (light and full)
+        run: |
+          set -euo pipefail
+          for profile in light full; do
+            for dir in charts/*/; do
+              chart=$(basename "$dir")
+              values=()
+              [[ -f "values/common/$chart.yaml" ]] && values+=(-f "values/common/$chart.yaml")
+              [[ -f "values/$profile/$chart.yaml" ]] && values+=(-f "values/$profile/$chart.yaml")
+              helm lint "$dir" "${values[@]}"
+              helm template "$chart" "$dir" -n rekognitor "${values[@]}" >/dev/null
+            done
+          done
+      - name: no secrets in charts/
+        run: |
+          set -euo pipefail
+          grep -qE '^  CLIENT_ID: "set-by-installer"$' charts/streamer/values.yaml
+          grep -qE '^  SECRET: "set-by-installer"$' charts/streamer/values.yaml
+          grep -qE '^  authSecret: "set-by-installer"$' charts/mqtt/values.yaml
+
+  linux:
+    name: linux (${{ matrix.cluster }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        cluster: [k0s, k0s-docker]
+    env:
+      CLUSTER: ${{ matrix.cluster }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: test credentials (random, masked in the logs)
+        run: |
+          id=ci-$(uuidgen); key=$(openssl rand -hex 48 | tr a-f A-F)
+          id2=ci-$(uuidgen); key2=$(openssl rand -hex 48 | tr a-f A-F)
+          for v in "$id" "$key" "$id2" "$key2"; do echo "::add-mask::$v"; done
+          { echo "REKOGNITOR_CLIENT_ID=$id"; echo "REKOGNITOR_SECRET=$key"
+            echo "NEW_CLIENT_ID=$id2"; echo "NEW_SECRET=$key2"; } >>"$GITHUB_ENV"
+      - name: install.sh --check
+        run: ./install.sh --check --cluster "$CLUSTER" 2>&1 | tee check.log
+      - name: install.sh
+        run: ./install.sh --yes --cluster "$CLUSTER" --profile light 2>&1 | tee install.log
+      - name: verify
+        run: |
+          set -euo pipefail
+          if [[ $CLUSTER == k0s ]]; then kc() { sudo k0s kubectl "$@"; }; else kc() { docker exec rekognitor-k0s k0s kubectl "$@"; }; fi
+          login() { printf '{"clientId":"%s","secret":"%s"}' "$1" "$2" | curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:31881/auth/login; }
+          kc -n rekognitor get pods -o wide
+          test "$(kc -n rekognitor get pods --no-headers | grep -vc ' Running ')" -eq 0
+          curl -fsS http://127.0.0.1:31881/healthz
+          curl -fsS http://127.0.0.1:31881/rtsp/health
+          timeout 5 bash -c '</dev/tcp/127.0.0.1/31883'   # MQTT NodePort
+          kc -n rekognitor get svc streamer mqtt -o jsonpath='{range .items[*]}{.metadata.name} {.spec.type}{"\n"}{end}' >svc.txt
+          cat svc.txt
+          ! grep -q LoadBalancer svc.txt
+          kc get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' | grep -q k0s
+          # credentials: in the Secret, nowhere else
+          test "$(kc -n rekognitor get secret rekognitor-credentials -o jsonpath='{.data.SECRET}' | base64 -d)" = "$REKOGNITOR_SECRET"
+          ! kc -n rekognitor get statefulset streamer -o yaml | grep -qF "$REKOGNITOR_SECRET"
+          ! kc -n rekognitor get statefulset streamer -o yaml | grep -qF "$REKOGNITOR_CLIENT_ID"
+          kc -n rekognitor get statefulset streamer -o yaml | grep -q 'name: rekognitor-credentials'
+          ! grep -rqF "$REKOGNITOR_SECRET" ~/.rekognitor install.log
+          test ! -e ~/.rekognitor/kubeconfig && test ! -e ~/.rekognitor/secrets
+          # admin access is not left to the user without sudo/docker
+          ! ls ~/.rekognitor | grep -qi kubeconfig
+          test "$(login "$REKOGNITOR_CLIENT_ID" "$REKOGNITOR_SECRET")" = 200
+          test "$(login "$REKOGNITOR_CLIENT_ID" WRONG)" = 401
+      - name: install.sh again (upgrade, no credentials given -> keeps the Secret)
+        run: env -u REKOGNITOR_CLIENT_ID -u REKOGNITOR_SECRET ./install.sh --yes --cluster "$CLUSTER" 2>&1 | tee upgrade.log
+      - name: install.sh --update-credentials
+        run: |
+          set -euo pipefail
+          REKOGNITOR_CLIENT_ID=$NEW_CLIENT_ID REKOGNITOR_SECRET=$NEW_SECRET ./install.sh --yes --cluster "$CLUSTER" --update-credentials 2>&1 | tee update-credentials.log
+          login() { printf '{"clientId":"%s","secret":"%s"}' "$1" "$2" | curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:31881/auth/login; }
+          test "$(login "$NEW_CLIENT_ID" "$NEW_SECRET")" = 200
+          test "$(login "$REKOGNITOR_CLIENT_ID" "$REKOGNITOR_SECRET")" = 401
+      - name: uninstall.sh
+        run: ./uninstall.sh --yes 2>&1 | tee uninstall.log
+      - name: verify removal
+        run: |
+          set -euo pipefail
+          test ! -e ~/.rekognitor
+          if [[ $CLUSTER == k0s ]]; then
+            test ! -e /usr/local/bin/k0s
+            ! systemctl is-active --quiet k0scontroller
+          else
+            ! docker container inspect rekognitor-k0s >/dev/null 2>&1
+            ! docker volume inspect rekognitor-k0s >/dev/null 2>&1
+          fi
+      - name: diagnostics
+        if: failure()
+        run: |
+          set +e
+          if [[ $CLUSTER == k0s ]]; then kc() { sudo k0s kubectl "$@"; }; else kc() { docker exec rekognitor-k0s k0s kubectl "$@"; }; fi
+          kc get all,pvc,networkpolicy -A -o wide
+          kc get events -A --sort-by=.lastTimestamp | tail -60
+          for p in $(kc -n rekognitor get pods -o name); do
+            kc -n rekognitor describe "$p"; kc -n rekognitor logs "$p" --all-containers --tail=100
+          done
+          sudo journalctl -u k0scontroller --no-pager | tail -80
+          docker logs rekognitor-k0s 2>&1 | tail -80
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-logs-${{ matrix.cluster }}
+          path: '*.log'
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash 3.2
+        run: |
+          set -euo pipefail
+          /bin/bash --version | head -1
+          /bin/bash -n install.sh
+          /bin/bash -n uninstall.sh
+          /bin/bash install.sh --help
+          /bin/bash uninstall.sh --help
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $r = Invoke-ScriptAnalyzer -Path scripts/windows -Severity Error
+          $r | Format-Table -AutoSize
+          if ($r) { exit 1 }

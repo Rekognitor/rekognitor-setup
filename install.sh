@@ -1,0 +1,628 @@
+#!/usr/bin/env bash
+# Rekognitor installer for Linux and macOS (also used by install-windows.cmd inside WSL).
+#
+#   ./install.sh [--profile auto|light|full] [--cluster auto|k0s|k0s-docker|existing]
+#                [--yes] [--check] [--timeout SECONDS]
+#
+# Creates a single-node k0s Kubernetes (the same k0s version on every platform:
+# Linux and WSL run it natively, macOS in the official k0sproject/k0s container
+# on Docker Desktop or Colima), installs the rekognitor charts into namespace
+# "rekognitor" and waits until every pod is Ready. Services are exposed as
+# NodePorts (k0s has no LoadBalancer): UI 31881, MQTT 31883, MQTT/WebSocket 31882.
+# Idempotent: run it again to upgrade, or to start the cluster again (macOS)
+# after a reboot.
+#
+# API credentials: the CLIENT_ID and SECRET Rekognitor issues to the customer are
+# asked for without echo (or read from REKOGNITOR_CLIENT_ID / REKOGNITOR_SECRET),
+# never printed, never on a command line, never in a local file: they go
+# straight into the Kubernetes Secret "rekognitor-credentials", which the
+# streamer reads with secretKeyRef. Cluster admin access stays behind sudo (k0s)
+# or Docker (k0s-docker): the admin kubeconfig only exists in a private temp
+# directory while this script runs. Use `sudo k0s kubectl` afterwards.
+#
+# Everything it creates is recorded in ~/.rekognitor/state so uninstall.sh
+# removes exactly that and nothing it found already installed. Your
+# ~/.kube/config is never touched.
+#
+# Also works piped (`curl -fsSL .../install.sh | bash`): it then downloads this
+# repository to ~/.rekognitor/src and runs from there.
+#
+# Bash 3.2 compatible (macOS /bin/bash): no associative arrays, no mapfile.
+set -euo pipefail
+
+REPO_TARBALL=${REPO_TARBALL:-https://github.com/Rekognitor/rekognitor-setup/archive/refs/heads/main.tar.gz}
+REK_HOME=${REKOGNITOR_HOME:-$HOME/.rekognitor}
+if ! ROOT=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd); then ROOT=""; fi
+if [[ ! -d $ROOT/charts ]]; then
+  # piped through bash: fetch the whole repository (charts, values) and re-run from it
+  echo "Baixando o instalador do Rekognitor..."
+  rm -rf "$REK_HOME/src" && mkdir -p "$REK_HOME/src"
+  curl -fsSL "$REPO_TARBALL" | tar -xz -C "$REK_HOME/src" --strip-components=1
+  # stdin is this script's text: give the prompts the terminal back, when there is one
+  if (: </dev/tty) 2>/dev/null; then exec bash "$REK_HOME/src/install.sh" "$@" </dev/tty; fi
+  exec bash "$REK_HOME/src/install.sh" "$@"
+fi
+BIN=$REK_HOME/bin
+STATE=$REK_HOME/state
+CRED_SECRET=rekognitor-credentials # Secret with CLIENT_ID and SECRET (streamer)
+NAMESPACE=rekognitor # the streamer's DETECT_SERVICES_URL hardcodes detect.rekognitor.svc
+CHARTS=${CHARTS:-"redis mqtt detect vision streamer"}
+CLUSTER_NAME=rekognitor
+CONTAINER=rekognitor-k0s # --cluster k0s-docker
+API_PORT_DOCKER=16443    # host port of the k0s API in the container (127.0.0.1 only)
+UI_PORT=31881            # streamer NodePort
+MQTT_PORT=31883          # mqtt NodePort (TCP); 31882 = MQTT over WebSocket
+APP_PORTS="31881 31882 31883"
+
+# k0s pinned to the version the rekognitor.helm CI validates the charts on
+K0S_VERSION=${K0S_VERSION:-v1.37.1+k0s.0}
+K0S_IMAGE=${K0S_IMAGE:-docker.io/k0sproject/k0s:${K0S_VERSION/+/-}}
+LOCAL_PATH_VERSION=${LOCAL_PATH_VERSION:-v0.0.37}
+HELM_VERSION=${HELM_VERSION:-v3.21.4}
+COLIMA_CPU=${COLIMA_CPU:-4}
+COLIMA_MEMORY=${COLIMA_MEMORY:-8}
+COLIMA_DISK=${COLIMA_DISK:-40}
+
+PROFILE=auto CLUSTER=auto YES=0 CHECK_ONLY=0 TIMEOUT=1200 UPDATE_CREDS=0
+CRED_ID="" CRED_KEY="" CREDS_REPLACED=0
+
+# ---------------------------------------------------------------- output ----
+if [[ -t 1 ]]; then B=$'\e[1m' G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' C=$'\e[36m' N=$'\e[0m'; else B="" G="" Y="" R="" C="" N=""; fi
+step() { printf '\n%s==> %s%s\n' "$C$B" "$*" "$N"; }
+ok() { printf '  %s✔%s %s\n' "$G" "$N" "$*"; }
+info() { printf '    %s\n' "$*"; }
+warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
+die() { printf '\n%s✘ ERRO:%s %s\n' "$R$B" "$N" "$*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Instalador do Rekognitor (Linux / macOS)
+
+Uso: $0 [opções]
+
+  --profile auto|light|full   recursos dos serviços (padrão: auto)
+                                light: 1 réplica do detect, para máquinas com < 6 CPUs
+                                full : 3-5 réplicas do detect (autoscaling)
+  --cluster auto|k0s|k0s-docker|existing
+                              auto (padrão): Linux/WSL = k0s, macOS = k0s-docker
+                              k0s-docker: k0s no contêiner oficial (Docker)
+                              existing: usa o cluster do KUBECONFIG atual
+  --timeout SEGUNDOS          espera máxima pelos pods (padrão: $TIMEOUT)
+  --update-credentials        pede de novo o CLIENT_ID e o SECRET (troca as credenciais)
+  --check                     só verifica os pré-requisitos, não instala nada
+  -y, --yes                   não pede confirmação
+  -h, --help                  esta ajuda
+EOF
+}
+
+while (($#)); do
+  case $1 in
+    --profile) PROFILE=${2:?}; shift ;;
+    --cluster) CLUSTER=${2:?}; shift ;;
+    --timeout) TIMEOUT=${2:?}; shift ;;
+    --check) CHECK_ONLY=1 ;;
+    --update-credentials) UPDATE_CREDS=1 ;;
+    -y | --yes) YES=1 ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage; die "opção desconhecida: $1" ;;
+  esac
+  shift
+done
+case $PROFILE in auto | light | full) ;; *) die "--profile deve ser auto, light ou full" ;; esac
+case $CLUSTER in auto | k0s | k0s-docker | existing) ;; *) die "--cluster deve ser auto, k0s, k0s-docker ou existing" ;; esac
+
+# ----------------------------------------------------------------- state ----
+state_get() { if [[ -f $STATE ]]; then sed -n "s/^$1=//p" "$STATE" | tail -1; fi; }
+state_set() {
+  mkdir -p "$REK_HOME"
+  if [[ -f $STATE ]]; then grep -v "^$1=" "$STATE" >"$STATE.tmp" || true; else : >"$STATE.tmp"; fi
+  echo "$1=$2" >>"$STATE.tmp"
+  mv "$STATE.tmp" "$STATE"
+}
+
+# ------------------------------------------------------------- platform ----
+OS=$(uname -s)
+case $(uname -m) in
+  x86_64 | amd64) ARCH=amd64 ;;
+  aarch64 | arm64) ARCH=arm64 ;;
+  *) die "arquitetura $(uname -m) não suportada (use x86_64 ou arm64)" ;;
+esac
+case $OS in
+  Linux) PLAT=linux ;;
+  Darwin) PLAT=darwin ;;
+  *) die "sistema $OS não suportado por este script (no Windows use install-windows.cmd)" ;;
+esac
+IS_WSL=0
+grep -qi microsoft /proc/version 2>/dev/null && IS_WSL=1
+
+SUDO=""
+if [[ $(id -u) -ne 0 ]]; then SUDO=sudo; fi
+
+have() { command -v "$1" >/dev/null 2>&1; }
+cpus() { if [[ $PLAT == darwin ]]; then sysctl -n hw.ncpu; else nproc; fi; }
+mem_gb() {
+  if [[ $PLAT == darwin ]]; then echo $(($(sysctl -n hw.memsize) / 1024 / 1024 / 1024))
+  else awk '/MemTotal/ {printf "%d", $2/1024/1024 + 0.5}' /proc/meminfo; fi
+}
+disk_free_gb() { df -Pk "$1" | awk 'NR==2 {printf "%d", $4/1024/1024}'; }
+sha256() { if have sha256sum; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+# A listening socket, or anything answering a TCP connect: Kubernetes NodePorts
+# (iptables/nftables) and WSL mirrored-mode ports are not listening sockets here.
+port_in_use() {
+  if [[ $PLAT == darwin ]]; then lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+  elif have ss; then ss -Hltn "sport = :$1" 2>/dev/null | grep -q . && return 0; fi
+  local rc=0
+  curl -s -m 2 -o /dev/null "http://127.0.0.1:$1/" 2>/dev/null || rc=$?
+  # 7 = connection refused, 28 = timeout (filtered): nothing there
+  [[ $rc != 7 && $rc != 28 ]]
+}
+lan_ip() {
+  if [[ $PLAT == darwin ]]; then ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "<IP-desta-máquina>"
+  else hostname -I 2>/dev/null | awk '{print $1}'; fi
+}
+confirm() {
+  [[ $YES == 1 ]] && return 0
+  local a
+  read -r -p "$1 [s/N] " a || true
+  [[ $a == s || $a == S || $a == y || $a == Y ]]
+}
+
+kc() { KUBECONFIG=$KCFG kubectl "$@"; }
+k() { kc -n "$NAMESPACE" "$@"; }
+
+[[ $CLUSTER == auto ]] && { if [[ $PLAT == darwin ]]; then CLUSTER=k0s-docker; else CLUSTER=k0s; fi; }
+PREV_CLUSTER=$(state_get CLUSTER)
+if [[ -n $PREV_CLUSTER && $PREV_CLUSTER != "$CLUSTER" ]]; then
+  die "o Rekognitor já foi instalado aqui com --cluster $PREV_CLUSTER. Rode ./uninstall.sh antes de trocar para $CLUSTER."
+fi
+
+# ------------------------------------------------------------ preflight ----
+preflight() {
+  step "Verificando pré-requisitos"
+  local n m d fail=0
+  n=$(cpus) m=$(mem_gb) d=$(disk_free_gb "$HOME")
+  ok "sistema: $OS $ARCH$([[ $IS_WSL == 1 ]] && echo ' (WSL2)')"
+  if ((n < 2)); then warn "CPUs: $n (mínimo 2)"; fail=1; elif ((n < 4)); then warn "CPUs: $n (recomendado 4 ou mais)"; else ok "CPUs: $n"; fi
+  if ((m < 4)); then warn "memória: ${m} GB (mínimo 4 GB)"; fail=1; elif ((m < 8)); then warn "memória: ${m} GB (recomendado 8 GB)"; else ok "memória: ${m} GB"; fi
+  if ((d < 15)); then warn "disco livre em $HOME: ${d} GB (mínimo 15 GB)"; fail=1; else ok "disco livre: ${d} GB"; fi
+  have curl || { warn "curl não encontrado (instale com o gerenciador de pacotes)"; fail=1; }
+  if curl -sS -o /dev/null -m 15 https://registry-1.docker.io/v2/ 2>/dev/null; then ok "internet: Docker Hub acessível"
+  else warn "sem acesso a https://registry-1.docker.io (as imagens vêm do Docker Hub)"; fail=1; fi
+
+  case $CLUSTER in
+    k0s)
+      [[ $PLAT == linux ]] || { warn "o k0s nativo só roda em Linux; no macOS use --cluster k0s-docker"; fail=1; }
+      if [[ -d /run/systemd/system ]]; then ok "systemd ativo"; else warn "systemd não está ativo (o k0s roda como serviço; no WSL habilite [boot] systemd=true)"; fail=1; fi
+      if [[ -n $SUDO ]]; then
+        have sudo || { warn "sudo não encontrado: rode como root"; fail=1; }
+        info "o k0s é instalado com sudo: sua senha pode ser pedida"
+      fi
+      ;;
+    k0s-docker)
+      if docker_ready; then ok "Docker: $(docker_desc)"
+      elif [[ $PLAT == darwin ]]; then
+        if have brew; then ok "Homebrew encontrado: Colima (Docker gratuito) será instalado"
+        else warn "Docker não encontrado e sem Homebrew. Instale o Homebrew (https://brew.sh) ou o Docker Desktop e rode de novo"; fail=1; fi
+      else warn "Docker não está rodando (necessário para --cluster k0s-docker)"; fail=1; fi
+      ;;
+    existing)
+      if have kubectl && kubectl cluster-info >/dev/null 2>&1; then ok "cluster existente: $(kubectl config current-context)"
+      else warn "--cluster existing: kubectl não alcança nenhum cluster (KUBECONFIG)"; fail=1; fi
+      ;;
+  esac
+
+  # A fresh install needs the host ports free. On a re-run our own cluster holds them.
+  if [[ -z $PREV_CLUSTER && $CLUSTER != existing ]]; then
+    local p busy=""
+    for p in $APP_PORTS $(if [[ $CLUSTER == k0s ]]; then echo 6443 10250; else echo $API_PORT_DOCKER; fi); do port_in_use "$p" && busy="$busy $p"; done
+    if [[ -n $busy ]]; then
+      warn "portas já em uso:$busy (outro Kubernetes, Docker ou o próprio Rekognitor já rodando?)"
+      fail=1
+    else ok "portas livres: $APP_PORTS"; fi
+  fi
+  return $fail
+}
+
+docker_ready() { have docker && docker info >/dev/null 2>&1; }
+docker_desc() {
+  local n c m
+  read -r n c m < <(docker info --format '{{.Name}} {{.NCPU}} {{.MemTotal}}' 2>/dev/null) || true
+  if [[ -n ${m:-} ]]; then echo "$n: $c CPUs, $((m / 1073741824)) GB"; else echo ok; fi
+}
+
+# ---------------------------------------------------------------- tools ----
+# download URL DEST SHA256
+download() {
+  local tmp sum
+  tmp=$(mktemp)
+  curl -fsSL --retry 3 -o "$tmp" "$1" || die "falha ao baixar $1"
+  sum=$(sha256 "$tmp")
+  [[ $sum == "$3" ]] || { rm -f "$tmp"; die "checksum inválido para $1"; }
+  mv "$tmp" "$2"
+}
+
+ensure_kubectl() {
+  if have kubectl; then ok "kubectl: $(command -v kubectl)"; return; fi
+  local v sum
+  v=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+  sum=$(curl -fsSL "https://dl.k8s.io/release/$v/bin/$PLAT/$ARCH/kubectl.sha256")
+  download "https://dl.k8s.io/release/$v/bin/$PLAT/$ARCH/kubectl" "$BIN/kubectl" "$sum"
+  chmod +x "$BIN/kubectl"
+  ok "kubectl $v instalado em $BIN"
+}
+
+ensure_helm() {
+  if have helm; then ok "helm: $(helm version --short 2>/dev/null)"; return; fi
+  local f=helm-$HELM_VERSION-$PLAT-$ARCH.tar.gz sum tmp
+  sum=$(curl -fsSL "https://get.helm.sh/$f.sha256sum" | cut -d' ' -f1)
+  tmp=$(mktemp -d)
+  download "https://get.helm.sh/$f" "$tmp/$f" "$sum"
+  tar -xzf "$tmp/$f" -C "$tmp"
+  mv "$tmp/$PLAT-$ARCH/helm" "$BIN/helm"
+  rm -rf "$tmp"
+  ok "helm $HELM_VERSION instalado em $BIN"
+}
+
+# -------------------------------------------------------------- clusters ----
+wait_cluster() {
+  info "aguardando o Kubernetes ficar pronto..."
+  local _i
+  for _i in $(seq 120); do kc get nodes 2>/dev/null | grep -q . && break; sleep 2; done
+  kc wait --for=condition=Ready node --all --timeout=300s >/dev/null
+  for _i in $(seq 90); do kc -n kube-system get deploy coredns >/dev/null 2>&1 && kc -n kube-system get ds kube-router >/dev/null 2>&1 && break; sleep 2; done
+  kc -n kube-system rollout status deploy/coredns --timeout=300s >/dev/null
+  kc -n kube-system rollout status ds/kube-router --timeout=300s >/dev/null
+  ok "Kubernetes pronto: k0s $(kc get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}')"
+}
+
+# k0s ships no StorageClass; vision's PVC needs one (same setup as the helm repo CI)
+ensure_storage() {
+  if kc get storageclass -o jsonpath='{range .items[*]}{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}{"\n"}{end}' 2>/dev/null | grep -q true; then
+    ok "StorageClass padrão: $(kc get storageclass -o name | head -1 | sed 's#.*/##')"
+    return
+  fi
+  kc apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_VERSION/deploy/local-path-storage.yaml" >/dev/null
+  kc patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' >/dev/null
+  kc -n local-path-storage rollout status deploy/local-path-provisioner --timeout=300s >/dev/null
+  ok "StorageClass padrão: local-path ($LOCAL_PATH_VERSION)"
+}
+
+cluster_k0s() {
+  step "Kubernetes (k0s $K0S_VERSION)"
+  if [[ -x /usr/local/bin/k0s ]]; then
+    ok "k0s já instalado: $(/usr/local/bin/k0s version)"
+    $SUDO /usr/local/bin/k0s start >/dev/null 2>&1 || true # no-op when it is running
+  else
+    info "baixando o k0s $K0S_VERSION..."
+    local sum
+    sum=$(curl -fsSL "https://github.com/k0sproject/k0s/releases/download/$K0S_VERSION/sha256sums.txt" |
+      awk -v f="*k0s-$K0S_VERSION-$ARCH" '$2 == f {print $1}')
+    [[ -n $sum ]] || die "checksum do k0s $K0S_VERSION ($ARCH) não encontrado"
+    download "https://github.com/k0sproject/k0s/releases/download/$K0S_VERSION/k0s-$K0S_VERSION-$ARCH" "$BIN/k0s.download" "$sum"
+    $SUDO install -m 755 "$BIN/k0s.download" /usr/local/bin/k0s
+    rm -f "$BIN/k0s.download"
+    # --single: controller + worker on this machine, no taints. kube-router (the
+    # default CNI) enforces the detect/vision NetworkPolicies.
+    $SUDO /usr/local/bin/k0s install controller --single
+    $SUDO /usr/local/bin/k0s start
+    state_set K0S_INSTALLED 1
+    ok "k0s instalado (serviço k0scontroller: inicia sozinho com a máquina)"
+  fi
+  local _i
+  for _i in $(seq 90); do $SUDO /usr/local/bin/k0s kubeconfig admin >"$KCFG" 2>/dev/null && break; sleep 2; done
+  [[ -s $KCFG ]] || die "o k0s não gerou o kubeconfig (veja: sudo k0s status; sudo journalctl -u k0scontroller)"
+  chmod 600 "$KCFG"
+  wait_cluster
+  ensure_storage
+}
+
+ensure_docker_mac() {
+  docker_ready && { ok "Docker: $(docker_desc)"; return; }
+  local colima_sock=$HOME/.colima/$CLUSTER_NAME/docker.sock
+  have brew || die "Docker não encontrado. Instale o Homebrew (https://brew.sh) ou o Docker Desktop e rode de novo."
+  local pkg added=""
+  for pkg in colima docker; do
+    if ! brew list --formula "$pkg" >/dev/null 2>&1; then
+      info "brew install $pkg..."
+      brew install "$pkg" >/dev/null
+      added="$added $pkg"
+    fi
+  done
+  [[ -n $added ]] && state_set BREW_INSTALLED "$(state_get BREW_INSTALLED)$added"
+  info "iniciando a VM Colima '$CLUSTER_NAME' (${COLIMA_CPU} CPUs, ${COLIMA_MEMORY} GB)..."
+  colima start "$CLUSTER_NAME" --cpu "$COLIMA_CPU" --memory "$COLIMA_MEMORY" --disk "$COLIMA_DISK" 2>&1 | sed 's/^/    /'
+  state_set COLIMA_PROFILE "$CLUSTER_NAME"
+  export DOCKER_HOST=unix://$colima_sock
+  docker_ready || die "o Docker do Colima não respondeu"
+  ok "Docker (Colima): $(docker_desc)"
+}
+
+cluster_k0s_docker() {
+  step "Kubernetes (k0s $K0S_VERSION em contêiner)"
+  # a previous run started our Colima VM: point docker at it (and start it after a reboot)
+  local colima _i
+  colima=$(state_get COLIMA_PROFILE)
+  if [[ -n $colima ]]; then
+    export DOCKER_HOST=unix://$HOME/.colima/$colima/docker.sock
+    docker_ready || { info "iniciando a VM Colima '$colima'..."; colima start "$colima" 2>&1 | sed 's/^/    /'; }
+  fi
+  if [[ $PLAT == darwin ]]; then ensure_docker_mac; else docker_ready || die "Docker não está rodando"; fi
+  if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+    ok "contêiner $CONTAINER já existe"
+    docker start "$CONTAINER" >/dev/null
+  else
+    info "baixando $K0S_IMAGE e criando o contêiner $CONTAINER..."
+    docker pull -q "$K0S_IMAGE" >/dev/null || die "falha ao baixar $K0S_IMAGE"
+    # the official way to run k0s in Docker (docs.k0sproject.io: "Run k0s in Docker"),
+    # controller + worker in one container; NodePorts published on the host.
+    docker run -d --name "$CONTAINER" --hostname "$CLUSTER_NAME" --restart unless-stopped \
+      --privileged --cgroupns=host --tmpfs /run -v "$CONTAINER:/var/lib/k0s" \
+      -p "127.0.0.1:$API_PORT_DOCKER:6443" -p 31881:31881 -p 31882:31882 -p 31883:31883 \
+      "$K0S_IMAGE" k0s controller --enable-worker --no-taints >/dev/null
+    state_set K0S_CONTAINER "$CONTAINER"
+    ok "contêiner $CONTAINER criado (reinicia junto com o Docker)"
+  fi
+  for _i in $(seq 90); do docker exec "$CONTAINER" k0s kubeconfig admin >"$KCFG" 2>/dev/null && break; sleep 2; done
+  [[ -s $KCFG ]] || die "o k0s do contêiner não gerou o kubeconfig (veja: docker logs $CONTAINER)"
+  # the kubeconfig points at the container IP: use the published port instead
+  sed "s#server: https://.*#server: https://127.0.0.1:$API_PORT_DOCKER#" "$KCFG" >"$KCFG.tmp" && mv "$KCFG.tmp" "$KCFG"
+  chmod 600 "$KCFG"
+  wait_cluster
+  ensure_storage
+}
+
+cluster_existing() {
+  step "Kubernetes (cluster existente)"
+  kubectl config view --raw --minify >"$KCFG"
+  chmod 600 "$KCFG"
+  ok "usando o contexto $(kubectl config current-context)"
+}
+
+# --------------------------------------------------------------- deploy ----
+pick_profile() {
+  [[ $PROFILE != auto ]] && return
+  # sum of allocatable CPUs ("4" or "3500m") across nodes
+  local cpu
+  cpu=$(kc get nodes -o jsonpath='{range .items[*]}{.status.allocatable.cpu}{"\n"}{end}' |
+    awk '/m$/ {sub(/m/,""); s+=$1/1000; next} {s+=$1} END {printf "%d", s}')
+  if ((cpu >= 6)); then PROFILE=full; else PROFILE=light; fi
+  info "perfil automático: $PROFILE ($cpu CPUs no cluster)"
+}
+
+rand_hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
+b64() { base64 | tr -d '\n'; }
+valid_cred() { [[ -n $1 && ${#1} -le 512 && $1 =~ ^[A-Za-z0-9._~+/=-]+$ ]]; }
+
+# Reads the API credentials Rekognitor issued into CRED_ID / CRED_KEY (memory
+# only): from REKOGNITOR_CLIENT_ID / REKOGNITOR_SECRET, or typed without echo.
+collect_credentials() {
+  if [[ -n ${REKOGNITOR_CLIENT_ID:-} || -n ${REKOGNITOR_SECRET:-} ]]; then
+    CRED_ID=${REKOGNITOR_CLIENT_ID:-} CRED_KEY=${REKOGNITOR_SECRET:-}
+    if ! valid_cred "$CRED_ID" || ! valid_cred "$CRED_KEY"; then
+      die "REKOGNITOR_CLIENT_ID / REKOGNITOR_SECRET vazios ou com caracteres inválidos"
+    fi
+    ok "credenciais da API lidas de REKOGNITOR_CLIENT_ID / REKOGNITOR_SECRET"
+    return
+  fi
+  [[ -t 0 ]] || die "sem terminal para pedir as credenciais: defina REKOGNITOR_CLIENT_ID e REKOGNITOR_SECRET"
+  step "Credenciais da API Rekognitor"
+  info "Digite o CLIENT_ID e o SECRET fornecidos pela Rekognitor."
+  info "O que você digitar não aparece na tela; cada um é pedido duas vezes."
+  local again _try
+  for _try in 1 2 3; do
+    read -r -s -p "    Identificação do cliente (CLIENT_ID): " CRED_ID; echo
+    read -r -s -p "    Repita o CLIENT_ID:                   " again; echo
+    read -r -s -p "    Chave de acesso (SECRET):             " CRED_KEY; echo
+    if [[ $CRED_ID != "$again" ]]; then warn "os dois CLIENT_ID digitados não conferem"; continue; fi
+    read -r -s -p "    Repita o SECRET:                      " again; echo
+    if [[ $CRED_KEY != "$again" ]]; then warn "os dois SECRET digitados não conferem"; continue; fi
+    if ! valid_cred "$CRED_ID" || ! valid_cred "$CRED_KEY"; then warn "credenciais vazias ou com caracteres inválidos"; continue; fi
+    again=""
+    ok "credenciais recebidas (não são exibidas nem gravadas em arquivo)"
+    return
+  done
+  CRED_ID="" CRED_KEY=""
+  die "credenciais não informadas"
+}
+
+# Stores the credentials in the Secret (only cluster admins can read it: sudo
+# k0s / Docker access). The manifest goes through stdin, never argv.
+ensure_credentials() {
+  local exists=0
+  k get secret "$CRED_SECRET" >/dev/null 2>&1 && exists=1
+  if [[ -z $CRED_ID ]]; then
+    if [[ $exists == 1 ]]; then ok "credenciais da API: já configuradas (Secret $CRED_SECRET)"; return; fi
+    collect_credentials
+  fi
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: %s\n  namespace: %s\n  labels:\n    app.kubernetes.io/part-of: rekognitor\ntype: Opaque\ndata:\n  CLIENT_ID: %s\n  SECRET: %s\n' \
+    "$CRED_SECRET" "$NAMESPACE" "$(printf %s "$CRED_ID" | b64)" "$(printf %s "$CRED_KEY" | b64)" | kc apply -f - >/dev/null ||
+    die "falha ao gravar o Secret $CRED_SECRET"
+  CRED_ID="" CRED_KEY=""
+  [[ $exists == 1 ]] && CREDS_REPLACED=1
+  ok "credenciais da API gravadas no Secret $CRED_SECRET (namespace $NAMESPACE)"
+}
+
+# The mqtt dashboard's session-signing key: internal, generated once and kept in
+# the chart's own Secret; handed to helm through a private values file.
+mqtt_values() {
+  local key
+  key=$(k get secret mqtt-dashboard -o jsonpath='{.data.auth-secret}' 2>/dev/null | base64 --decode 2>/dev/null || true)
+  [[ -n $key ]] || key=$(rand_hex 32)
+  printf 'dashboard:\n  authSecret: "%s"\n' "$key" >"$TMPD/mqtt-secret.yaml"
+}
+
+pods_table() { k get pods -o wide 2>/dev/null | awk '{printf "    %-28s %-7s %-22s %s\n", $1, $2, $3, $4}'; }
+
+deploy() {
+  step "Instalando o Rekognitor (perfil $PROFILE)"
+  kc create namespace "$NAMESPACE" --dry-run=client -o yaml | kc apply -f - >/dev/null
+  if [[ -n ${DOCKERHUB_USERNAME:-} && -n ${DOCKERHUB_TOKEN:-} ]]; then
+    k create secret docker-registry dockerhub --docker-server=https://index.docker.io/v1/ \
+      --docker-username="$DOCKERHUB_USERNAME" --docker-password="$DOCKERHUB_TOKEN" \
+      --dry-run=client -o yaml | kc apply -f - >/dev/null
+    until k get sa default >/dev/null 2>&1; do sleep 1; done
+    k patch sa default -p '{"imagePullSecrets":[{"name":"dockerhub"}]}' >/dev/null
+    ok "pulls autenticados no Docker Hub"
+  fi
+  ensure_credentials
+  mqtt_values
+  local chart args
+  for chart in $CHARTS; do
+    [[ -d $ROOT/charts/$chart ]] || die "chart $chart não encontrado em $ROOT/charts"
+    args=""
+    # common: NodePort services (k0s has no LoadBalancer); then the resource profile
+    [[ -f $ROOT/values/common/$chart.yaml ]] && args="-f $ROOT/values/common/$chart.yaml"
+    [[ -f $ROOT/values/$PROFILE/$chart.yaml ]] && args="$args -f $ROOT/values/$PROFILE/$chart.yaml"
+    case $chart in
+      streamer) args="$args --set credentials.existingSecret=$CRED_SECRET" ;;
+      mqtt) args="$args -f $TMPD/mqtt-secret.yaml" ;;
+    esac
+    # the customer's own overrides, kept across upgrades: ~/.rekognitor/values/<chart>.yaml
+    [[ -f $REK_HOME/values/$chart.yaml ]] && args="$args -f $REK_HOME/values/$chart.yaml"
+    # shellcheck disable=SC2086
+    KUBECONFIG=$KCFG helm upgrade --install "$chart" "$ROOT/charts/$chart" -n "$NAMESPACE" $args >/dev/null ||
+      die "helm falhou ao instalar $chart"
+    ok "$chart"
+  done
+  state_set CHARTS "$CHARTS"
+  state_set PROFILE "$PROFILE"
+  # env from a Secret is read at container start
+  [[ $CREDS_REPLACED == 1 ]] && k rollout restart statefulset/streamer >/dev/null
+
+  step "Aguardando os serviços (o 1º download das imagens pode levar alguns minutos)"
+  local deadline=$((SECONDS + TIMEOUT)) pending w last=""
+  while :; do
+    pending=""
+    for w in $(k get deploy,statefulset -o name); do
+      k rollout status "$w" --timeout=1s >/dev/null 2>&1 || pending="$pending ${w#*/}"
+    done
+    [[ -z $pending ]] && break
+    if ((SECONDS >= deadline)); then
+      pods_table
+      die "serviços não ficaram prontos em ${TIMEOUT}s:$pending. Veja: $(kubectl_hint) -n $NAMESPACE describe pods"
+    fi
+    if [[ $pending != "$last" ]]; then info "aguardando:$pending"; last=$pending; fi
+    sleep 5
+  done
+  pods_table
+  ok "todos os pods prontos"
+}
+
+health() {
+  step "Testando a aplicação"
+  local url=http://127.0.0.1:$UI_PORT h=""
+  if [[ $CLUSTER == existing ]]; then
+    # the cluster's NodePorts are not on this machine: go through a port-forward
+    k port-forward svc/streamer 18085:8085 >/dev/null 2>&1 &
+    PF_PID=$!
+    url=http://127.0.0.1:18085
+  fi
+  for _ in $(seq 60); do curl -fsS -m 5 -o /dev/null "$url/healthz" 2>/dev/null && break; sleep 3; done
+  curl -fsS -m 5 -o /dev/null "$url/healthz" || die "a interface não respondeu em $url"
+  ok "interface web respondendo em $url"
+  # the streamer's gRPC connections to detect/vision may still be dialing
+  for _ in $(seq 30); do
+    h=$(curl -fsS -m 5 "$url/rtsp/health" 2>/dev/null || true)
+    if echo "$h" | grep -q '"detect":{[^}]*"ok":true'; then break; fi
+    sleep 4
+  done
+  if echo "$h" | grep -q '"detect":{[^}]*"ok":true'; then ok "detecção (detect) conectada"; else warn "detect ainda não respondeu: $h"; fi
+  if echo "$h" | grep -q '"vision":{[^}]*"ok":true'; then ok "reconhecimento facial (vision) conectado"; fi
+  # the streamer must accept the credentials it got from the Secret; the JSON body
+  # goes through stdin and the values are read straight from the Secret
+  local code id key
+  id=$(k get secret "$CRED_SECRET" -o jsonpath='{.data.CLIENT_ID}' | base64 --decode)
+  key=$(k get secret "$CRED_SECRET" -o jsonpath='{.data.SECRET}' | base64 --decode)
+  code=$(printf '{"clientId":"%s","secret":"%s"}' "$id" "$key" |
+    curl -s -m 10 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- "$url/auth/login" || true)
+  id="" key=""
+  if [[ $code == 200 ]]; then ok "login com as credenciais da API aceito"; else warn "o streamer recusou as credenciais (HTTP $code): confira-as com --update-credentials"; fi
+}
+
+kubectl_hint() {
+  case $CLUSTER in
+    k0s) echo "${SUDO:+sudo }k0s kubectl" ;;
+    k0s-docker) echo "docker exec $CONTAINER k0s kubectl" ;;
+    existing) echo "kubectl" ;;
+  esac
+}
+
+summary() {
+  local ip
+  ip=$(lan_ip)
+  state_set INSTALLED_AT "$(date '+%Y-%m-%d %H:%M:%S')"
+  printf '\n%s╔══════════════════════════════════════════════════════════╗%s\n' "$G$B" "$N"
+  printf '%s║            Rekognitor instalado com sucesso!             ║%s\n' "$G$B" "$N"
+  printf '%s╚══════════════════════════════════════════════════════════╝%s\n\n' "$G$B" "$N"
+  cat <<EOF
+  Interface web    http://localhost:$UI_PORT
+                   na rede: http://$ip:$UI_PORT
+  MQTT (câmeras)   $ip:$MQTT_PORT   (WebSocket: $ip:31882)
+  Perfil           $PROFILE
+
+  Login            CLIENT_ID e SECRET fornecidos pela Rekognitor
+                   (guardados no Secret $CRED_SECRET; trocar: install.sh --update-credentials)
+
+  Comandos úteis
+    $(kubectl_hint) -n $NAMESPACE get pods
+    $ROOT/install.sh      atualizar / reiniciar
+    $ROOT/uninstall.sh    desinstalar
+EOF
+  if [[ $CLUSTER == k0s-docker && -n $(state_get COLIMA_PROFILE) ]]; then
+    echo
+    warn "após reiniciar o computador, rode o install.sh de novo para religar o Colima e o Rekognitor."
+  fi
+}
+
+# ----------------------------------------------------------------- main ----
+printf '%sRekognitor — instalador%s  (%s, cluster: %s)\n' "$B" "$N" "$OS" "$CLUSTER"
+mkdir -p "$BIN"
+export PATH=$BIN:$PATH
+# private scratch: the admin kubeconfig and the mqtt values live here only while
+# the script runs (0700, removed on exit)
+TMPD=$(mktemp -d)
+chmod 700 "$TMPD"
+KCFG=$TMPD/kubeconfig
+PF_PID=""
+cleanup() {
+  [[ -n $PF_PID ]] && kill "$PF_PID" 2>/dev/null
+  rm -rf "$TMPD"
+}
+trap cleanup EXIT
+# files earlier versions of this installer left behind
+rm -f "$REK_HOME/kubeconfig" "$REK_HOME/env" "$REK_HOME/secrets"
+
+if ! preflight; then
+  [[ $CHECK_ONLY == 1 ]] && die "pré-requisitos não atendidos (veja os itens com !)"
+  die "corrija os itens marcados com ! e rode de novo"
+fi
+if [[ $CHECK_ONLY == 1 ]]; then
+  printf '\n%sTudo certo: esta máquina pode instalar o Rekognitor.%s\n' "$G$B" "$N"
+  exit 0
+fi
+
+if [[ -z $PREV_CLUSTER ]]; then
+  echo
+  info "Serão instalados: Kubernetes ($CLUSTER), kubectl/helm (se faltarem) e os serviços"
+  info "$CHARTS no namespace '$NAMESPACE'."
+  confirm "Continuar?" || die "cancelado"
+fi
+# asked up front on a fresh install (or to replace them), so nobody waits for the
+# image downloads to be prompted; on upgrades the existing Secret is kept
+if [[ -z $PREV_CLUSTER || $UPDATE_CREDS == 1 || -n ${REKOGNITOR_CLIENT_ID:-} ]]; then collect_credentials; fi
+[[ $CLUSTER == k0s && -n $SUDO ]] && { sudo -v || die "sudo é necessário para instalar o k0s"; }
+
+state_set CLUSTER "$CLUSTER"
+state_set ROOT "$ROOT"
+step "Ferramentas"
+ensure_helm
+ensure_kubectl
+case $CLUSTER in
+  k0s) cluster_k0s ;;
+  k0s-docker) cluster_k0s_docker ;;
+  existing) cluster_existing ;;
+esac
+pick_profile
+deploy
+health
+summary

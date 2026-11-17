@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.serviceName }}
+spec:
+  serviceName: "{{ .Values.serviceName }}"
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.serviceName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.serviceName }}
+    spec:
+      containers:
+        - name: {{ .Values.serviceName }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"          
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+          env:
+            {{- $secret := .Values.credentials.existingSecret }}
+            {{- range $key, $value := .Values.env }}
+            {{- if not (and $secret (has $key (list "CLIENT_ID" "SECRET"))) }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $secret }}
+            # API credentials issued by Rekognitor, read from a Secret so they never
+            # appear in the StatefulSet, the Helm values or the pod spec.
+            - name: CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: CLIENT_ID
+            - name: SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: SECRET
+            {{- end }}
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"            

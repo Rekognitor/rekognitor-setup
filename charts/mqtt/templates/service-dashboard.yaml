@@ -1,0 +1,23 @@
+{{- if .Values.dashboard.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.serviceName }}-dashboard
+  labels:
+    app: {{ .Values.serviceName }}
+spec:
+  # ClusterIP by default (internal only). Reach the UI with:
+  #   kubectl port-forward svc/{{ .Values.serviceName }}-dashboard {{ .Values.dashboard.httpPort }}:{{ .Values.dashboard.httpPort }}
+  # or set dashboard.service.type to NodePort / LoadBalancer to expose it.
+  type: {{ .Values.dashboard.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.dashboard.httpPort }}
+      targetPort: {{ .Values.dashboard.httpPort }}
+      protocol: TCP
+      {{- if and (ne .Values.dashboard.service.type "ClusterIP") .Values.dashboard.service.nodePort }}
+      nodePort: {{ .Values.dashboard.service.nodePort }}
+      {{- end }}
+  selector:
+    app: {{ .Values.serviceName }}
+{{- end }}

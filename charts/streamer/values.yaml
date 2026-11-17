@@ -1,0 +1,69 @@
+serviceName: streamer
+replicaCount: 1
+image:
+  repository: rekognitor/rekognitor-streamer
+  pullPolicy: Always
+  tag: latest
+service:
+  type: LoadBalancer
+  port: 8085
+  targetPort: 8085
+  nodePort: 31881
+# Name of an existing Secret with keys CLIENT_ID and SECRET (the API credentials
+# Rekognitor issues to each customer). When set, env.CLIENT_ID / env.SECRET below
+# are ignored and the streamer reads them from the Secret. rekognitor-setup's
+# installer creates it as "rekognitor-credentials".
+credentials:
+  existingSecret: ""
+env:
+  CLIENT_ID: "set-by-installer"
+  SECRET: "set-by-installer"
+  PORT: "8085"
+  MODE: "1"
+  # rekognitor-detect (Go/ONNX) listens on 50051; without a port gRPC dials 443.
+  DETECT_SERVICES_URL: dns:///detect.rekognitor.svc.cluster.local:50051
+  GRPC_RENEW_CONN_TICKER: "60"
+  # Boot values only: RETURN_IMAGE, PUBLISH_LIVENESS_FRAMES and the DEFAULT_* below
+  # are editable at runtime in the UI (Settings) and, with USE_REDIS=1, the UI value
+  # persists in Redis and wins over these on later restarts.
+  RETURN_IMAGE: "1"
+  USE_EXTERNAL_MQTT: "1"
+  MQTT_SERVER_ADDRESS: mqtt:1883
+  USE_REDIS: "1"
+  REDIS_ADDRESS: redis:6379
+  REDIS_DB: "0"
+  # --- Web UI (served by the streamer itself, same origin as the API) ------
+  # The streamer serves the SPA on its own REST port when WEB_DIR is set. The
+  # image already bundles it at /app/web and sets this; repeated for clarity.
+  WEB_DIR: /app/web
+  # config.js is generated from env. apiBaseUrl stays "" (same origin as the UI).
+  # The MQTT broker is a different host/port, so point the browser at its ws
+  # listener — the mqtt chart's ws NodePort. The URL is derived in the browser as
+  # ws://<page-host>:<this port> (set MQTT_WS_PUBLIC_URL to pin a full URL).
+  MQTT_WS_PUBLIC_PORT: "31882"
+  # CORS is NOT needed for the UI anymore (same origin). Kept only for external
+  # REST clients on other origins; "*" is safe with bearer tokens (no cookies).
+  CORS_ALLOWED_ORIGINS: "*"
+  # Opt-in bearer auth on /rtsp/*. "0" = open API (login still issues a token
+  # but it isn't enforced). Set "1" to require it; the UI logs in with the
+  # CLIENT_ID / SECRET above. POST /auth/login is always reachable.
+  REQUIRE_AUTH: "0"
+  # /auth/login token lifetime, seconds (optional; code default is 12h).
+  AUTH_TOKEN_TTL_SECONDS: "43200"
+  # Capture defaults the "new camera" form pre-fills (optional; values shown
+  # are the code defaults). GET /rtsp/config exposes them; PUT overrides live.
+  DEFAULT_THRESHOLD: "0.5"
+  DEFAULT_DELAY: "1"
+  # Detect model new cameras use: "rtdet" (RT-DETRv2-S).
+  DEFAULT_MODEL_FILTER: "rtdet"
+  # Models the UI offers (Settings + new-camera form).
+  MODEL_CATALOG: "rtdet"
+  DEFAULT_CLASS_FILTER: "0"
+  # --- Face recognition (facematch capability) -----------------------------
+  # gRPC address of the rekognitor-vision service (helm-charts/vision). Enables
+  # the facematch capability and the /rtsp/faces enrollment endpoints; remove
+  # it to turn face recognition off. Vision being down is not a boot error:
+  # frames then publish without faces.
+  FACE_SERVICES_URL: vision:50051
+  # Prediction names faces are searched in (comma-separated).
+  FACE_PERSON_CLASSES: person

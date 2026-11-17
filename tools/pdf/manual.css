@@ -1,0 +1,30 @@
+@page { size: A4; margin: 18mm 16mm 20mm; }
+@page :first { margin: 0; }
+html { font-family: "DejaVu Sans", "Segoe UI", Helvetica, Arial, sans-serif; font-size: 10.5pt; color: #1f2330; line-height: 1.5; }
+body { max-width: none; margin: 0; }
+.cover { height: 297mm; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; page-break-after: always;
+  background: linear-gradient(135deg, #241c3a 0%, #3b2a63 60%, #5b3b8a 100%); color: #fff; margin: 0; padding: 0 24mm; }
+.cover .k { letter-spacing: .25em; font-size: 9pt; color: #f2a68a; text-transform: uppercase; }
+.cover h1 { font-size: 34pt; border: 0; color: #fff; margin: 8mm 0 4mm; font-weight: 600; }
+.cover p { font-size: 13pt; color: #ddd6ee; margin: 0; }
+.cover .meta { margin-top: 18mm; font-size: 10pt; color: #b9b0d4; }
+h1 { font-size: 20pt; color: #3b2a63; margin: 0 0 4mm; }
+h2 { font-size: 15pt; color: #3b2a63; border-bottom: 2px solid #e4def2; padding-bottom: 2mm; margin-top: 9mm; page-break-after: avoid; }
+/* the big per-OS sections start on a new page */
+h2[id="4-instalação-no-windows"], h2[id="5-instalação-no-linux"], h2[id="6-instalação-no-macos"], h2[id="7-primeiro-acesso"], h2[id="12-solução-de-problemas"] { page-break-before: always; }
+h3 { font-size: 12pt; color: #2b2f3e; margin-top: 6mm; page-break-after: avoid; }
+a { color: #5b3b8a; text-decoration: none; }
+code { font-family: "DejaVu Sans Mono", Consolas, monospace; font-size: 9pt; background: #f2eff8; padding: .5px 4px; border-radius: 3px; }
+pre { background: #1e1e2e; color: #e6e6e6; padding: 3mm 4mm; border-radius: 4px; font-size: 8.6pt; line-height: 1.4; white-space: pre-wrap; word-break: break-all; page-break-inside: avoid; }
+pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 3mm 0; font-size: 9.3pt; page-break-inside: avoid; }
+th { background: #3b2a63; color: #fff; text-align: left; font-weight: 600; }
+th, td { border: 1px solid #ddd8e8; padding: 1.6mm 2.2mm; vertical-align: top; }
+tr:nth-child(even) td { background: #faf9fd; }
+blockquote { margin: 3mm 0; padding: 2mm 4mm; border-left: 4px solid #f2a68a; background: #fdf5f1; color: #4a3f3a; page-break-inside: avoid; }
+blockquote p { margin: 0; }
+img { max-width: 100%; display: block; margin: 3mm auto; page-break-inside: avoid; }
+figure { margin: 0; page-break-inside: avoid; }
+figcaption { text-align: center; font-size: 8.5pt; color: #6b6f80; margin-top: -1mm; }
+li { margin: .8mm 0; }
+hr { display: none; }

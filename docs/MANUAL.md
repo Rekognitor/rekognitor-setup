@@ -1,6 +1,6 @@
 # Manual de instalação do Rekognitor
 
-Este manual mostra como instalar, atualizar e desinstalar o Rekognitor em **Windows**, **Linux** e **macOS**, usando os instaladores deste repositório.
+Este manual mostra como instalar, atualizar e desinstalar o Rekognitor em **Windows**, **Linux** e **macOS**, usando os instaladores deste repositório. Para usar o sistema no dia a dia (câmeras, eventos, rostos e relatórios), veja o **[Manual de uso](Manual-de-Uso-Rekognitor.pdf)**.
 
 > **Sobre as imagens:** todas as imagens deste manual são saídas reais dos instaladores e da interface do Rekognitor. As instalações completas foram feitas num Ubuntu 24.04 com 4 CPUs (máquina de testes do CI), com credenciais de teste passadas por variáveis de ambiente. As telas do próprio Windows (UAC, SmartScreen) são descritas em texto.
 
@@ -253,6 +253,8 @@ No Docker Desktop, reserve pelo menos **4 CPUs e 8 GB** em *Settings → Resourc
    - **Chave de acesso:** o seu `SECRET`.
 
 ![Tela de login do Rekognitor](img/interface-login.png)
+
+Depois de entrar, o **[Manual de uso](Manual-de-Uso-Rekognitor.pdf)** mostra como incluir câmeras e usar cada tela.
 
 ### 7.1 Credenciais da API
 
